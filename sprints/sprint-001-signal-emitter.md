@@ -1,4 +1,4 @@
-# Sprint 001 — package scaffold + signal emitter
+# Sprint 001 — signal emitter with strict validation
 
 ---
 
@@ -15,28 +15,27 @@ pass_kind: architecture
 
 ## scope
 
-Author the Python package `price_space_llm` under `src/` and make the locked vocabulary emittable from it. Concretely: (1) `pyproject.toml` that names the package, pins Python ≥ 3.11, and declares `pytest` as the sole dev dependency; (2) `src/price_space_llm/signals.py` that loads `signals/0.1.json` at import, wraps `sdd-kit-2/lib/sdd.py`'s `SignalEmitter` with the strict validator-extras posture WORKING_AGREEMENT commits to (extra payload fields raise, not just missing required fields), and adds an opt-in JSONL sink that writes one line per emit to `logs/{run_id}/signals.jsonl` on flush; (3) tests that verify the locked vocabulary loads, an unknown tag raises, missing required fields raise, extra payload fields raise, and the JSONL sink writes one line per emitted signal.
+Make the locked vocabulary loadable and validating from within a Python package. Three files: `pyproject.toml` (uv-managed, Python ≥ 3.11, pytest as the only dev dep, package discovery includes `sdd-kit-2/lib` so `import sdd` works), `src/price_space_llm/signals.py` (reads `signals/0.1.json`, wraps `sdd.SignalEmitter` with a strict-extras check that raises on any payload field not in the schema), and `tests/test_signals.py` (four tests: vocabulary loads, unknown tag raises, missing required field raises, extra payload field raises).
 
-The concept is one: **make the vocabulary loadable, emittable, and testable from within a Python package that honors the working agreement's discipline**. Every downstream sprint's emit call goes through what this sprint lands.
+No JSONL sink this sprint. No MCP. No PyTorch. That work lands in Sprint 2 and later.
 
 ---
 
 ## prerequisites
 
-- Sprint 0 (Vocabulary Session) closed. `signals/0.1.json` locked at v0.1.
+- Sprint 0. `signals/0.1.json` locked at v0.1.
 
 ---
 
 ## context_files
 
-- `sdd-kit-2/AGENTS.md` (working agreement — session-start read)
-- `sdd-kit-2/lib/sdd.py` (the reference `SignalVocabulary` + `SignalEmitter` + `SignalCapture` surface — the exact API the project wraps)
-- `signals/0.1.json` (the locked vocabulary — 55 tags, strict extras posture)
-- `BLACKBOARD.md` (`## Decisions` for project scope)
-- `WORKING_AGREEMENT.md` (canonical home registry places the emitter at `src/price_space_llm/signals.py`; vocabulary discipline is strict validator-extras)
-- `sdd-kit-2/example/src/wordcount/__main__.py` (concrete `SignalVocabulary(json.loads(...))` + `SignalEmitter(vocab)` usage pattern to pattern-match against)
-- `sdd-kit-2/example/tests/test_scanner.py` (concrete `SignalCapture` testing pattern)
-- `sdd-kit-2/TECHNIQUES.md` §1 #2 (schema enforced at the speaker's mouth — the discipline this sprint operationalises)
+- `sdd-kit-2/AGENTS.md`
+- `sdd-kit-2/lib/sdd.py`
+- `signals/0.1.json`
+- `BLACKBOARD.md`
+- `WORKING_AGREEMENT.md`
+- `sdd-kit-2/example/src/wordcount/__main__.py`
+- `sdd-kit-2/example/tests/test_scanner.py`
 
 ---
 
@@ -44,25 +43,24 @@ The concept is one: **make the vocabulary loadable, emittable, and testable from
 
 ### Emits
 
-At sprint execution time, only during the test run. The tests exercise the emitter and therefore fire tags from the locked vocabulary. Expected during `pytest tests/test_signals.py -v`:
+Test-time only. The tests exercise the emitter and fire tags from the locked vocabulary. Expected during `pytest`:
 
-- `SESSION_INIT` (`run_id`, `run_kind='eval'`, `vocab_version='0.1'`, `config_hash`, `git_sha`, `data_hash`, `seed`) — fires once in the test that exercises the JSONL sink
-- `SESSION_COMPLETE` (`run_id`, `exit_code=0`, `elapsed_seconds`, `n_signals_emitted`) — fires once in the same test
+- `SESSION_INIT` and `SESSION_COMPLETE` may fire in tests that need a bounded capture; not required.
 
-No pipeline emission this sprint. This is a content sprint whose runtime footprint is the test suite.
+The emitter itself fires no signals at import.
 
 ### Consumes
 
-- `signals/0.1.json` at import time (loaded once by `price_space_llm.signals` module)
+- `signals/0.1.json` at import time.
 
 ### Invariants
 
-- No out-of-vocabulary tags emitted anywhere. The wrapper raises before any tag leaves the emitter.
-- `signals/0.1.json` is read-only for this sprint; no write.
-- No third-party runtime dependencies added (dev dependency `pytest` only).
-- Strict validator-extras posture: any payload field not declared in the schema raises `ValueError` at the emit call, not just missing required fields.
-- No `SPY` string anywhere in `src/` (per WORKING_AGREEMENT invariant — the greppability test).
-- The package's Python 3.11 minimum matches WORKING_AGREEMENT.
+- No out-of-vocabulary tags emitted anywhere.
+- Extra payload fields raise `ValueError` at the emit call (strict-extras per WORKING_AGREEMENT).
+- Missing required payload fields raise `ValueError` (inherited from `sdd.SignalVocabulary.validate`).
+- `signals/0.1.json` is read-only for this sprint.
+- No runtime dependencies added. `pytest` is the one dev dep.
+- No `SPY` string anywhere in `src/` (word-boundary, outside comments and docstrings).
 
 ---
 
@@ -71,10 +69,7 @@ No pipeline emission this sprint. This is a content sprint whose runtime footpri
 ### Files created
 
 - `pyproject.toml`
-- `src/price_space_llm/__init__.py`
 - `src/price_space_llm/signals.py`
-- `tests/__init__.py`
-- `tests/conftest.py`
 - `tests/test_signals.py`
 
 ### Files modified
@@ -83,63 +78,60 @@ None.
 
 ### Content assertions
 
-- `pyproject.toml` declares `name = "price-space-llm"`, `requires-python = ">=3.11"`, and lists `pytest` under a dev-dependency group.
-- `src/price_space_llm/signals.py` defines `def load_vocabulary(path: Path = ...) -> SignalVocabulary` that reads `signals/0.1.json` from the project root and returns a `SignalVocabulary` instance whose `tags()` length equals 55.
-- `src/price_space_llm/signals.py` defines a class (e.g. `StrictSignalEmitter`) that extends `sdd_kit_2.lib.sdd.SignalEmitter` (or delegates to it) with strict-extras validation: any payload key not in `schema[tag]["payload"]` raises `ValueError`.
-- `src/price_space_llm/signals.py` exports a module-level `emitter: StrictSignalEmitter` bound to the locked vocabulary, plus `capture` (a context manager) and `Signal` (re-exported from `sdd_kit_2.lib.sdd`).
-- `src/price_space_llm/signals.py` accepts an optional `jsonl_sink: Path | None` constructor argument that, when set, appends one JSON object per emit to that path on flush.
-- `tests/test_signals.py` contains at least these named tests: `test_locked_vocabulary_loads`, `test_unknown_tag_raises`, `test_missing_required_payload_raises`, `test_extra_payload_field_raises`, `test_jsonl_sink_writes_one_line_per_emit`, `test_session_init_and_complete_bookend_a_capture`.
-- No file under `src/` contains the string `SPY` (word-boundary, case-sensitive) outside a comment or docstring. `grep -rE '\bSPY\b' src/` returns empty (or only lines matching `#|"""`).
+- `pyproject.toml` declares `name = "price-space-llm"`, `requires-python = ">=3.11"`, lists `pytest` in a dev group, and sets package discovery so both `src/price_space_llm/` and `sdd-kit-2/lib/` are importable.
+- `src/price_space_llm/signals.py` defines `load_vocabulary(path=...) -> SignalVocabulary` that reads `signals/0.1.json` and returns an instance whose `tags()` length equals 55.
+- `src/price_space_llm/signals.py` defines a class (name: `StrictSignalEmitter`) that either subclasses or delegates to `sdd.SignalEmitter` and overrides validation to raise on payload keys not in the tag's schema.
+- `src/price_space_llm/signals.py` exports a module-level `emitter: StrictSignalEmitter` bound to the locked vocabulary.
+- `src/price_space_llm/__init__.py` exists (empty).
+- `tests/__init__.py` exists (empty).
+- `tests/test_signals.py` contains four named tests: `test_locked_vocabulary_loads_with_55_tags`, `test_unknown_tag_raises`, `test_missing_required_payload_raises`, `test_extra_payload_field_raises`.
+
+Empty `__init__.py` files count as ceremony, not code — three code files + two empty init files.
 
 ### Command exit codes
 
-Architect runs each and reports the exit code. The Agent does not run these.
+Architect runs each and reports the exit code.
 
 - `python -m pytest tests/ -v` returns 0.
 - `python -c "from price_space_llm.signals import emitter; print(len(emitter._vocab.tags()))"` prints `55` and returns 0.
-- `python -c "from price_space_llm.signals import emitter; emitter.emit('NOT_A_REAL_TAG')"` returns non-zero and stderr contains `Unknown signal tag`.
-- `python -c "from price_space_llm.signals import emitter; emitter.emit('SESSION_INIT', bogus_field=1)"` returns non-zero and stderr contains `unknown payload field` (or equivalent strict-extras message).
-- `grep -rE '\bSPY\b' src/ --include='*.py'` returns empty (exit 1 for grep-with-no-match is expected; the test asserts empty stdout).
+- `python -c "from price_space_llm.signals import emitter; emitter.emit('NOT_A_REAL_TAG')"` returns non-zero; stderr contains `Unknown signal tag`.
+- `python -c "from price_space_llm.signals import emitter; emitter.emit('SESSION_INIT', bogus_field=1)"` returns non-zero; stderr message names the unknown field.
+- `grep -rE '\bSPY\b' src/ --include='*.py'` prints nothing.
 
 ---
 
 ## observation contract
 
-Not applicable. `pass_kind: architecture` — this sprint produces no product behavior. The dual contract (signal + artifact) is the verification; no UI, no audio, no simulator run, no training loop invoked.
+Not applicable. `pass_kind: architecture`, no product behavior.
 
 ---
 
 ## done criteria
 
-`price_space_llm.signals.emitter` is importable, loads the 55-tag locked vocabulary, refuses unknown tags and unknown payload fields, and streams to a JSONL sink when configured. The test suite (six named tests) passes clean.
+`price_space_llm.signals.emitter` imports. It loads the 55-tag locked vocabulary. It refuses unknown tags. It refuses unknown payload fields. Four tests pass.
 
 ---
 
 ## notes
 
-**Why extend, not fork.** `sdd-kit-2/lib/sdd.py` is read-only per convention (AGENTS.md hard rule 1 for foundations; kit-adoption convention for `lib/`). The strict-extras posture WORKING_AGREEMENT commits to is stricter than the reference `SignalVocabulary.validate` (which checks required fields only). Extending — either by subclassing `SignalEmitter` and overriding the validate hook, or by delegating and pre-validating — keeps the vendored kit clean and the strict posture project-side.
+**Import path for `sdd.py`.** `sdd-kit-2/lib/sdd.py` is in the repo. `pyproject.toml` adds `sdd-kit-2/lib` to package discovery; `from sdd import SignalVocabulary, SignalEmitter` works from any module. No `sys.path` hacks in the module.
 
-**Why a JSONL sink now.** The reference `SignalCapture.format_for_ai` returns a formatted string for a paste-back workflow. This project's observation contract (WORKING_AGREEMENT § Observation contract environment) verifies via JSONL trace files. Landing the sink in Sprint 1 means every downstream sprint's emits are already trace-able; adding it in a later sprint would require retrofitting.
+**Why extend, not fork.** `sdd-kit-2/lib/sdd.py` is read-only per convention (AGENTS.md hard rule 1 applies to `foundations/`; `lib/` follows the same convention because the file ships upstream). The strict-extras posture is stricter than `SignalVocabulary.validate`. Extend it in `price_space_llm.signals`. `sdd.py` stays untouched.
 
-**Why no MCP or PyTorch this sprint.** Both need bridge mappings per AGENTS.md hard rule 10; the current `WORKING_AGREEMENT § External SDK bridge mappings` entries for them are stubs. First sprint to import either halts with `bridge_mapping_required`. Sprint 2 or 3 fills the MCP bridge mapping and lands `scripts/probe_channels.py`; the Pydantic bridge mapping fills alongside the ExperimentConfig work.
-
-**pyproject.toml choices.** uv-managed (WORKING_AGREEMENT § Stack). Package name kebab-case (`price-space-llm`); import name snake_case (`price_space_llm`) — Python convention. Src-layout (`src/price_space_llm/`) — matches the canonical home registry.
-
-**Vendoring `sdd-kit-2/lib/sdd.py`.** Import path: with src-layout and sdd-kit-2/ at project root, the cleanest import is a symlink or a `PYTHONPATH` addition. Simplest for this sprint: add a `[tool.hatch.build.targets.wheel] packages = ["src/price_space_llm"]` entry AND include sdd-kit-2/lib in `sys.path` via a small `conftest.py` shim, or vendor `sdd.py` as `src/price_space_llm/_sdd.py` and re-export. The **vendor** path is cleaner (no path shim); the **shim** path is honest about the read-only relationship. Architect calls it at plan-mode review; sprint executes accordingly.
+**No JSONL sink this sprint.** The sink is Sprint 2. This sprint proves the emitter validates; the sink proves capture works.
 
 ---
 
 ## plan-mode review checklist
 
-- [ ] Scope is concrete and bounded (one paragraph; one verifiable property of the artifact set).
-- [ ] `context_files` covers everything the Agent needs to read; the wordcount example patterns are cited.
-- [ ] Signal contract's `Emits` list references only tags in `signals/0.1.json` (SESSION_INIT + SESSION_COMPLETE, both in the locked v0.1).
-- [ ] Artifact contract is gradable: content assertions are concrete, command exit codes are runnable.
-- [ ] Observation contract is not required (`pass_kind: architecture`, no product behavior).
-- [ ] Sprint sweet spot: 6 files, one concept. Above the ≤2 file ceiling (hard rule 6) but matches the wordcount Sprint 1 scaffold precedent (5 files for one scaffold concept). Confirm the concept-count discipline applies here.
-- [ ] Vendor-vs-shim decision for `sdd-kit-2/lib/sdd.py` — Architect calls.
-- [ ] Sprint dispatches after Architect says "go" (or names revisions).
+- [ ] Scope one paragraph, one concept.
+- [ ] Three code files, two ceremony init files. Within hard rule 6.
+- [ ] `context_files` covers the read set.
+- [ ] Signal contract references only tags in `signals/0.1.json`.
+- [ ] Artifact contract is gradable.
+- [ ] No observation contract needed.
+- [ ] Sprint dispatches on Architect "go".
 
 ---
 
-*Sprint 001 — package scaffold + signal emitter. Six files, one concept. Plan-mode. Sprint 2 dispatches after this one closes clean.*
+*Sprint 001. Three code files. One concept: strict-validating emitter over the locked vocabulary.*
