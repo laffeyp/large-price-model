@@ -1,0 +1,98 @@
+{
+  "_template_note": "This is the empty starter for a project's signal vocabulary. Run the Vocabulary Session per sdd-kit/grammar/BOOTSTRAP.md to populate it. The result becomes the project's signals/0.1.json (not this template file; copy this to signals/0.1.json first and edit there). Once locked, signals/0.1.json is the contract — edits go through the supervised-grammar-evolution proposal taxonomy and bump the version.",
+
+  "version": "0.1",
+  "locked": false,
+  "locked_at": null,
+  "locked_by": null,
+  "prior_version": null,
+
+  "ontology": {
+    "_comment": "Layer 0 — what kinds of things exist in this system. Per grammar/PER_LAYER.md Layer 0.",
+    "entities": []
+  },
+
+  "categories": [
+    {
+      "name": "event",
+      "description": "Discrete state transitions",
+      "stratum": "event"
+    },
+    {
+      "name": "ambient",
+      "description": "Continuous samples with payload; throttled",
+      "stratum": "ambient"
+    },
+    {
+      "name": "summary",
+      "description": "Typed roll-ups at boundary close",
+      "stratum": "summary"
+    },
+    {
+      "name": "incident",
+      "description": "Anomalies and halt-worthy events",
+      "stratum": "incident"
+    },
+    {
+      "_comment": "Add project-specific architectural-boundary categories below (e.g., for a UI project: 'view'; for a trading project: 'ingest', 'encode', 'execute'; for a game: 'narrative', 'world', 'bird'). Categories align with architectural boundaries, not class names."
+    }
+  ],
+
+  "tags": [
+    {
+      "_template_example": "Replace this example block with real tags from the Vocabulary Session. Format mirrors signals/0.1.json from existing projects.",
+      "name": "EXAMPLE_TAG_TO_REPLACE",
+      "category": "event",
+      "stratum": "event",
+      "payload": ["example_field_1", "example_field_2"],
+      "optional_payload": [],
+      "note": "One-sentence description of what this tag means and when it fires. The note is read by future sessions; write it for them."
+    }
+  ],
+
+  "sessions": {
+    "_comment": "Layer 3 — bounded event streams. Per grammar/PER_LAYER.md Layer 3.",
+    "strata": []
+  },
+
+  "temporal_invariants": {
+    "_comment": "Layer 4 — timing invariants. Per grammar/PER_LAYER.md Layer 4.",
+    "invariants": []
+  },
+
+  "state_transitions": {
+    "_comment": "Layer 5 — ordering rules without timing. Per grammar/PER_LAYER.md Layer 5.",
+    "rules": []
+  },
+
+  "operators": {
+    "_comment": "Layer 6 — runtime operators. Per grammar/PER_LAYER.md Layer 6.",
+    "operators": []
+  },
+
+  "evidence_constraints": {
+    "_comment": "Layer 7 — payload constraints beyond type signature. Per grammar/PER_LAYER.md Layer 7.",
+    "constraints": []
+  },
+
+  "report_binding": {
+    "_comment": "Layer 8 — how the project's tag set binds into the Signal Report template. See sdd-kit/templates/SIGNAL_REPORT.md.",
+    "observed_categories": [],
+    "rendered_categories": [],
+    "notes_categories": ["incident"]
+  },
+
+  "grammar_growth": {
+    "_comment": "Layer 10 — meta-rules for how the grammar evolves. Per grammar/PRINCIPLES.md proposal taxonomy.",
+    "taxonomy_version": "0.1",
+    "project_overrides": []
+  },
+
+  "view_payload_universal": {
+    "_comment": "If the project has UI, every view-category tag inherits these four structural fields by convention. Per grammar/EXAMPLES.md Example 6 (SCENE_RENDERED). Remove this block if the project has no view category.",
+    "frame": {"x": "number", "y": "number", "w": "number", "h": "number"},
+    "visible": "boolean",
+    "scene_id": "string",
+    "layer": "string (background | midground | foreground | overlay)"
+  }
+}

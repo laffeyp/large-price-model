@@ -1,0 +1,110 @@
+{
+  "_note": "Canonical proposals only per grammar/PRINCIPLES.md \u00a7 'The supervised-grammar-evolution proposal taxonomy'. Round 2 invented seven non-canonical proposal types; round 3 recasts. The eight canonical types are: NEW_TAG_PROPOSED, PAYLOAD_FIELD_PROPOSED, SEQUENCE_RULE_PROPOSED, INVARIANT_PROPOSED, TAG_SPLIT_PROPOSED, TAG_MERGE_PROPOSED, TAG_DEPRECATION_PROPOSED, ENTITY_MERGE_PROPOSED. Extension of the taxonomy is a Layer-10 grammar-growth change stamped at the kit-methodology level, not a move the Worker makes by writing new kinds inline. Pre-lock entity additions and rejections do not go through proposals.json at all \u2014 Step-1 Architect ratifies inline against signals/0.1.json \u00a7 entity_implied_but_unnamed.flags[] and against direct removals from entities[].",
+  "version_of_target_vocabulary": "0.1",
+  "opened_at": "2026-08-09",
+  "closed_at": "2026-08-09 (round 4)",
+  "proposals": [
+    {
+      "id": "P-001",
+      "kind": "ENTITY_MERGE_PROPOSED",
+      "layer": 0,
+      "candidate": "Baseline + Ablation \u2192 Model",
+      "rationale": "Baselines (LinearBaseline, MLPBaseline, GRUBaseline, TargetOnlyVariant, MagnitudeWeightedVariant) and Ablations (ChannelMixerVariant, PatchNVariant, QuantileHeadVariant) share the Model lifecycle: same training loop, same checkpoint format, same eval metrics, same simulator interface. Distinguish at Layer 2 via a payload attribute `run_kind` on TrainingRun.",
+      "source_citations": [
+        "tech-arch-v4.md \u00a78 (PriceSpaceLLM)",
+        "tech-arch-v4.md \u00a710 'Baselines \u2014 the ladder' + 'Architecture and target ablations'"
+      ],
+      "surfaced_by": "reviews/vocab-0.1-layer-0-review.md finding 1",
+      "outcome": "accepted",
+      "outcome_date": "2026-08-09",
+      "stamped_by": "Architect (Peter Laffey), inline via BLACKBOARD 2026-08-09"
+    },
+    {
+      "id": "P-002",
+      "kind": "ENTITY_MERGE_PROPOSED",
+      "layer": 0,
+      "candidate": "Prediction + Distribution \u2192 Prediction",
+      "rationale": "The simulator consumes `p[t] \u2208 \u211d^V` and derives `variance(p)`, `sharpness`, `p_up`, `expected_return` from it. Distribution names the object; Prediction names its role. One entity; the scalar derivations are payload fields at Layer 2.",
+      "source_citations": [
+        "tech-arch-v4.md \u00a711 'reads logits[:, -1, :] at the last position, softmaxes to p[t]'"
+      ],
+      "surfaced_by": "reviews/vocab-0.1-layer-0-review.md finding 2",
+      "outcome": "accepted",
+      "outcome_date": "2026-08-09",
+      "stamped_by": "Architect (Peter Laffey), inline via BLACKBOARD 2026-08-09"
+    },
+    {
+      "id": "P-003",
+      "kind": "ENTITY_MERGE_PROPOSED",
+      "layer": 0,
+      "candidate": "SpreadCalibration + KappaCalibration \u2192 CostCalibration",
+      "rationale": "One Layer-6 operator (the calibration scripts) writing to one directory (`artifacts/cost_calibration/`) that the simulator reads as one precondition ('required at simulator startup \u2014 hard fail'). The docs' lifecycle grouping favours one entity with two component fits; shortens the foreign-key graph Layer 2 traces.",
+      "source_citations": [
+        "tech-arch-v4.md \u00a711.1 'Cost model \u2014 spread calibration'",
+        "tech-arch-v4.md \u00a711.2 'Cost model \u2014 slippage coefficient (kappa)'",
+        "tech-arch-v4.md \u00a711 'A missing calibration file is a hard failure'"
+      ],
+      "surfaced_by": "reviews/vocab-0.1-layer-0-review.md finding 9",
+      "outcome": "accepted",
+      "outcome_date": "2026-08-09",
+      "stamped_by": "Architect (Peter Laffey), inline via BLACKBOARD 2026-08-09"
+    }
+  ],
+  "_recast_log": {
+    "_note": "Round-2 proposals that used non-canonical types. Round 3 recast per reviews/vocab-0.1-proposals-review.md.",
+    "recast": [
+      {
+        "round_3_id": "P-004 (CONFIG_RESOLVED NEW_TAG_PROPOSED, Layer 1)",
+        "round_4_disposition": "Removed per reviews/vocab-0.1-round-3-review.md finding 4. NEW_TAG_PROPOSED is Step-2 vocabulary; filing at Step 1 inverts the layer dependency order PRINCIPLES.md \u00a7'Dependency structure' names as non-negotiable. Moved to BLACKBOARD.md \u00a7 Deferred with revisit trigger 'sprint that opens Step 2 for CONFIG_RESOLVED'. The paired Layer-7 evidence constraint (`lambda_risk MUST be present`) also lands in BLACKBOARD Deferred with revisit trigger 'sprint that opens Step 8'."
+      },
+      {
+        "round_2_id": "P-004 (Symbol vs Channel distinct)",
+        "round_3_disposition": "Removed. Distinctness is the default; no verdict needed. Reasoning moves to rationale doc's per-layer decisions section when authored at Step 11."
+      },
+      {
+        "round_2_id": "P-005 (Bar/RawObservation/AlignedRow distinct)",
+        "round_3_disposition": "Removed. Same as above."
+      },
+      {
+        "round_2_id": "P-006 (Split)",
+        "round_3_disposition": "Moved to signals/0.1.json \u00a7 entity_implied_but_unnamed.flags[] for Step-1 inline Architect stamp."
+      },
+      {
+        "round_2_id": "P-007 (Session)",
+        "round_3_disposition": "Moved to flags[] for inline stamp."
+      },
+      {
+        "round_2_id": "P-008 (ExperimentConfig)",
+        "round_3_disposition": "Moved to flags[] for inline stamp. The CONFIG_RESOLVED tag shell it forecast is now P-004 (canonical NEW_TAG_PROPOSED, Layer 1)."
+      },
+      {
+        "round_2_id": "P-009 (Source)",
+        "round_3_disposition": "Moved to flags[] for inline stamp."
+      },
+      {
+        "round_2_id": "P-010 (IngestionCall TAG_SPLIT)",
+        "round_3_disposition": "Rejected \u2014 TAG_SPLIT_PROPOSED is for existing tags in different contexts; IngestionCall was never a tag. IngestionCall removed from entities[] inline; two Layer-1 NEW_TAG_PROPOSED shells (INGESTION_CALL_ISSUED, INGESTION_CALL_CACHED) open in Step 2, not now."
+      },
+      {
+        "round_2_id": "P-011 (Embedder/Bucketizer/Normalizer reclassification)",
+        "round_3_disposition": "Recorded as entity-list revision inline in signals/0.1.json (NormalizerState and BucketStats replace Normalizer and Bucketizer; Embedder removed from Layer 0). Dual-classification note lands in rationale doc at Step 11."
+      },
+      {
+        "round_2_id": "P-012 (Sprint rejection)",
+        "round_3_disposition": "Sprint removed from entities[] inline. Rationale-doc entry at Step 11 explains the category error."
+      },
+      {
+        "round_2_id": "P-013 (MetricSnapshot kit-pattern adoption)",
+        "round_3_disposition": "Moved to flags[] with kit-pattern-derivation note; inline Architect stamp is the adoption."
+      },
+      {
+        "round_2_id": "P-014 (Bucket ENTITY_IMPLIED_BUT_UNNAMED)",
+        "round_3_disposition": "Kept as flags[] entry; ENTITY_IMPLIED_BUT_UNNAMED is a Step-1 halt condition, not a proposal type."
+      },
+      {
+        "round_2_id": "P-015 (domain-vs-runtime commitment)",
+        "round_3_disposition": "Moved to BLACKBOARD.md ## Deferred with revisit trigger 'sprint that opens Step 7 (Layer 6)'."
+      }
+    ]
+  }
+}

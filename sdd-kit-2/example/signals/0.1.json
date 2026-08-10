@@ -1,0 +1,85 @@
+{
+  "version": "0.1",
+  "project": "wordcount",
+  "locked_on": "2026-05-24",
+  "categories": [
+    {
+      "name": "session",
+      "description": "Session-level events; SESSION_INIT and SESSION_COMPLETE bookend every run."
+    },
+    {
+      "name": "scan",
+      "description": "Filesystem traversal; one signal per directory entered, one per file considered."
+    },
+    {
+      "name": "report",
+      "description": "Output formatting and sink writes."
+    }
+  ],
+  "tags": [
+    {
+      "name": "SESSION_INIT",
+      "category": "session",
+      "stratum": "event",
+      "payload": ["root_path", "vocab_version", "config_signals_out"],
+      "note": "First signal in every run. Declares scan root, vocabulary version, and whether signals are being sunk to a file. Replays anchor relative to this."
+    },
+    {
+      "name": "SCAN_STARTED",
+      "category": "scan",
+      "stratum": "event",
+      "payload": ["root_path"],
+      "note": "Fired once after SESSION_INIT, before any directory is walked."
+    },
+    {
+      "name": "DIR_ENTERED",
+      "category": "scan",
+      "stratum": "event",
+      "payload": ["dir_path", "entry_count"],
+      "note": "Fired for each directory the scanner enters. entry_count is the number of children (files + subdirs)."
+    },
+    {
+      "name": "FILE_COUNTED",
+      "category": "scan",
+      "stratum": "event",
+      "payload": ["file_path", "bytes", "lines", "words", "chars"],
+      "note": "Fired for each file successfully read and counted."
+    },
+    {
+      "name": "FILE_SKIPPED",
+      "category": "scan",
+      "stratum": "incident",
+      "payload": ["file_path", "reason"],
+      "note": "Fired when a file is skipped (binary detected, permission denied, decode error). reason is a short enum-like string."
+    },
+    {
+      "name": "SCAN_COMPLETE",
+      "category": "scan",
+      "stratum": "summary",
+      "payload": ["files_counted", "files_skipped", "total_bytes", "total_words", "total_lines", "elapsed_seconds"],
+      "note": "Always-emit summary signal. Fired exactly once per run, after all directories are walked."
+    },
+    {
+      "name": "REPORT_EMITTED",
+      "category": "report",
+      "stratum": "event",
+      "payload": ["output_format", "byte_count", "destination"],
+      "note": "Fired after the JSON report is written. destination is 'stdout' or an absolute path."
+    },
+    {
+      "name": "SESSION_COMPLETE",
+      "category": "session",
+      "stratum": "summary",
+      "payload": ["exit_code", "elapsed_seconds"],
+      "note": "Last signal in every run. exit_code 0 for success; non-zero for partial (some files skipped) or failure."
+    }
+  ],
+  "invariants": [
+    "SESSION_INIT is the first signal in any capture.",
+    "SESSION_COMPLETE is the last signal in any capture.",
+    "SCAN_COMPLETE fires exactly once per run.",
+    "FILE_COUNTED and FILE_SKIPPED are mutually exclusive per file_path within a single run.",
+    "REPORT_EMITTED.byte_count must equal the size of the bytes written to destination."
+  ],
+  "rationale": "8 tags across 3 categories. Stratified per grammar/PRINCIPLES.md commitment 5: event tags for per-file operations, summary tags for run-level aggregates, incident tags for skips. SESSION_INIT/SCAN_STARTED separation lets future versions add pre-scan validation between them without breaking replay semantics. FILE_COUNTED payload is minimal-but-complete per technique #6: bytes/lines/words/chars exactly reconstructs the per-file decision."
+}

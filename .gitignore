@@ -1,0 +1,38 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+.python-version
+
+# Pipeline outputs (derived; regeneratable)
+data/raw/
+data/aligned/
+data/tokenized/
+data/manifests/
+artifacts/
+logs/
+wandb/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo

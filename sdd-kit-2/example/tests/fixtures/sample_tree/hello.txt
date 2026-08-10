@@ -1,0 +1,5 @@
+hello world this is a small text file
+used by the wordcount example tests
+five lines total
+roughly fifteen words
+end of file
