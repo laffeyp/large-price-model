@@ -28,7 +28,8 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 | H3 | Bridge-mapping-first for external SDKs (PyTorch, MCP tools, Hydra, Polars, W&B) prevents the guess-and-iterate loop that soundfield rounds 13/20-26 documented. Cost: authoring the bridge mapping is an extra Sprint-0-adjacent activity per SDK. Benefit: no sprint spent authoring code against a symbol the SDK does not expose. | _partially_ | Sprint 001 authored no code against un-mapped SDKs (all imports vendored or stdlib). |
 | H4 | The frozen-artifact contract (bucket_stats.json, normalizers.pt, spread_scaler.json, kappa.json) held by a paired "any consumer reads from this file, never recomputes" test is the pattern that stops the internal-consistency-but-external-inconsistency failure (Addendum D1's `AVAudioFile.read(into:)` returning short). | _pending_ | — |
 | H5 | For a project whose spec has already been reviewed and rewritten (v4 after v3 after v2 after v1), the Vocabulary Session runs faster than BOOTSTRAP.md's 2.5–4 hour estimate — because the spec's language is already stable and the entities are already named. Alternate: the review pass surfaced gaps the Vocabulary Session will re-surface. | _falsified_ | Wall clock ~6h across five review rounds on 2026-08-09→10; draft time ~30min. Review discipline paid for the extension. |
-| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprints 001, 002 first-pass clean. Sprint 003 first-pass at code layer, second-pass at build layer (duplicate pyproject destination). 2-for-2 code, 2-for-3 overall. |
+| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprints 001, 002 first-pass clean. Sprint 003 second-pass at build layer. Sprint 004 second-pass at test layer (one test used a field type reclassified in vocab round 4). 3-for-3 code layer, 3-for-4 overall. |
+| H7 | The vocabulary type strings are self-describing enough that a ~30-line parser enforces them across the whole schema. Adding a new type requires one entry in `_TYPE_CHECKERS` and one line in `_parse_type`. | _tentative_ | Sprint 004 landed the parser at ~40 lines; covered nine type kinds. Test: a sprint that adds `git_sha` as a format type. |
 
 ---
 
@@ -68,6 +69,33 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 - H3 (Bridge-mapping-first prevents guess-and-iterate). **Not tested this sprint.** Sprint 0 authored no code against SDKs. Sprint 1 tests.
 - H4 (Frozen-artifact contract with paired independent-reader test catches Addendum D1). **Named at Layer 7 for BucketStats, NormalizerState, SpreadScaler, Kappa; tested when the first artifact writes.** Awaits Sprint execution.
 - H5 (Vocabulary Session runs faster than BOOTSTRAP's 2.5–4 hour estimate on a spec-mature project). **Falsified in wall-clock, confirmed in draft time.** First-pass draft took ~30 minutes; five review-pass rounds pushed the total to ~6 hours across two working days. The review discipline extended the schedule but the resulting vocabulary is defendable — worth the trade for a project whose vocabulary will govern 25+ sprints of code.
+
+---
+
+### 2026-08-10 — Sprint 004: typed-payload enforcement closed
+
+**What happened.** `StrictSignalVocabulary.__init__` now parses each field's declared type string into a callable checker at load time. `validate` runs each field's checker on every emit. The vocabulary took five review rounds to nail down the types; the code now enforces them. Ten new tests cover the enum, sha256, int, bool, uuid, datetime_utc, date_iso, and list-element checks. Real-hex fixtures via `hashlib.sha256(...).hexdigest()` replace the `"a" * 64` placeholders. 17 tests pass; wheel rebuild clean; `emitter.emit('SESSION_INIT', run_kind='banana', ...)` raises with the exact allowed enum values named.
+
+**What worked.**
+
+- Precomputing the checkers at load is the right shape. Zero parsing cost at emit time; one dict lookup per field per emit. The `StrictSignalVocabulary.__init__` walks the schema once, builds a per-tag `dict[field_name, Checker]`, and stores it. Every subsequent `validate` call reads from precomputed structure.
+- The recursive parser handles `list<float>`, `dict<str, int>`, and `list<dict<str, int>>` cleanly. Vocabulary uses container types sparingly (only three payloads carry lists this size); parser handles the entire declared set without special cases.
+- Validation-error messages carry enough context to debug from the trace alone: `"Signal 'SESSION_INIT' field 'run_kind': expected one of ['align', ...], got 'banana'"`. The signal-driven-development principle — a signal names its own semantics — extends to validation failures.
+
+**What got in the way.**
+
+- The first-pass uuid test used `TRADE_LEDGERED.trade_id` on the assumption it was typed `uuid`. It was typed `uuid` in the initial vocabulary draft but reclassified to `entity_ref<Trade>` in round 4 of the vocabulary review. Test failed on first run. Fix moved the test to parser level (`_parse_type("uuid")` returned checker exercised directly). No field in v0.1 currently uses `uuid` — the checker is present for future vocabulary bumps but has no live coverage through the emitter.
+- The Layer-7 `range`, `gate`, `cardinality`, and `frozen_artifact` constraints stay uncovered by this sprint. They're aggregate or grading-time checks, not emit-time. The vocabulary declares them; nothing yet enforces them. Later sprint gets a grader that walks the trace against Layer 7.
+
+**What this says about the next kit version.**
+
+- **1. Vocabulary-to-code enforcement gap is a class of defect, not a single sprint.** The vocabulary declares three enforcement layers: field presence (Layer 2 required + strict extras — Sprint 001), field types (Layer 2 type strings — Sprint 004), field values and cross-signal invariants (Layer 7 constraints — deferred). Each layer needs its own enforcement pass, its own tests, and its own code. TECHNIQUES.md §1 commitment 2 ("schema enforced at the speaker's mouth") is a slogan that needs three checkmarks, not one. Candidate: split the commitment into three named sub-commitments with which sprint or grader owns each.
+- **2. Dead-code checkers are forward-compatibility, not waste.** `_check_uuid` and `_check_git_sha` don't have live vocabulary coverage in v0.1. Removing them would force re-authoring at v0.2 when a field first uses either. Keeping them costs one line each and buys the next vocabulary bump. Related to Addendum D's "verify the verifier" principle — the checker is present; the parser-level test exercises it; live coverage waits for the vocabulary to catch up.
+
+**Hypothesis verdicts.**
+
+- H6 (locked vocab → first-pass-clean downstream). Sprint 004 first-pass code-clean; second-pass test-clean (one test caught the reclassification the vocabulary went through in round 4). 3-for-4 overall counting both layers, or 3-for-3 code-clean. Tentative.
+- **New H7.** The vocabulary type strings are self-describing enough that a small parser (~30 lines) enforces them across the whole schema. Testable via: adding a new type to the vocabulary should require one entry in `_TYPE_CHECKERS` and one line change in `_parse_type`, no plumbing edits. Sprint that adds `git_sha` (40-char hex) as a format type tests it.
 
 ---
 
