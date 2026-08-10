@@ -21,6 +21,26 @@ packages = ["src/price_space_llm"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "sdd-kit-2/lib"]
 testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+filterwarnings = ["error"]
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["sdd-kit-2"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "PT"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/price_space_llm"]
+
+[[tool.mypy.overrides]]
+module = "sdd"
+ignore_missing_imports = true
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]

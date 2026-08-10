@@ -1,4 +1,5 @@
 """Tests for the strict signal emitter over the locked vocabulary."""
+
 import hashlib
 import json
 import time
@@ -12,7 +13,6 @@ from price_space_llm.signals import (
     emitter,
     load_vocabulary,
 )
-
 
 _REAL_HASH = hashlib.sha256(b"test-run-001").hexdigest()
 _REAL_DATA_HASH = hashlib.sha256(b"training-data-2015-2022").hexdigest()
@@ -56,7 +56,9 @@ VALID_CHECKPOINT_WRITTEN_PAYLOAD = {
 
 def test_locked_vocabulary_loads_all_tags():
     vocab = load_vocabulary()
-    raw = json.loads(files("price_space_llm._vocab").joinpath("0.1.json").read_text(encoding="utf-8"))
+    raw = json.loads(
+        files("price_space_llm._vocab").joinpath("0.1.json").read_text(encoding="utf-8")
+    )
     assert len(vocab.tags()) == len(raw["tags"])
 
 
@@ -110,6 +112,7 @@ def test_bool_masquerading_as_int_raises():
 
 def test_uuid_parser_rejects_malformed():
     from price_space_llm.signals import _parse_type
+
     uuid_check = _parse_type("uuid")
     uuid_check("550e8400-e29b-41d4-a716-446655440000")  # valid, no raise
     with pytest.raises(ValueError, match="uuid"):

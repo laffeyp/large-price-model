@@ -28,7 +28,8 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 | H3 | Bridge-mapping-first for external SDKs (PyTorch, MCP tools, Hydra, Polars, W&B) prevents the guess-and-iterate loop that soundfield rounds 13/20-26 documented. Cost: authoring the bridge mapping is an extra Sprint-0-adjacent activity per SDK. Benefit: no sprint spent authoring code against a symbol the SDK does not expose. | _partially_ | Sprint 001 authored no code against un-mapped SDKs (all imports vendored or stdlib). |
 | H4 | The frozen-artifact contract (bucket_stats.json, normalizers.pt, spread_scaler.json, kappa.json) held by a paired "any consumer reads from this file, never recomputes" test is the pattern that stops the internal-consistency-but-external-inconsistency failure (Addendum D1's `AVAudioFile.read(into:)` returning short). | _pending_ | — |
 | H5 | For a project whose spec has already been reviewed and rewritten (v4 after v3 after v2 after v1), the Vocabulary Session runs faster than BOOTSTRAP.md's 2.5–4 hour estimate — because the spec's language is already stable and the entities are already named. Alternate: the review pass surfaced gaps the Vocabulary Session will re-surface. | _falsified_ | Wall clock ~6h across five review rounds on 2026-08-09→10; draft time ~30min. Review discipline paid for the extension. |
-| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprints 001, 002, 005 first-pass clean. Sprint 003 second-pass at build layer; Sprint 004 second-pass at test layer. 4-for-4 code layer, 4-for-5 overall. |
+| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprints 001, 002, 005 first-pass clean. Sprint 003 second-pass at build layer; Sprint 004 second-pass at test layer; Sprint 006 second-pass at lint layer. 4-for-6 first-pass overall. |
+| H8 | Adopting ruff + mypy on an existing small codebase in one sprint is cheap because auto-fix does most of the work. | _tentative_ | Sprint 006: ruff auto-fix carried 80% (8-of-10); mypy has no auto-fix (0-of-4 auto, all manual). More data points from future tooling-adoption sprints on other codebases. |
 | H7 | The vocabulary type strings are self-describing enough that a ~30-line parser enforces them across the whole schema. Adding a new type requires one entry in `_TYPE_CHECKERS` and one line in `_parse_type`. | _tentative_ | Sprint 004 landed the parser at ~40 lines; covered nine type kinds. Test: a sprint that adds `git_sha` as a format type. |
 
 ---
@@ -69,6 +70,33 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 - H3 (Bridge-mapping-first prevents guess-and-iterate). **Not tested this sprint.** Sprint 0 authored no code against SDKs. Sprint 1 tests.
 - H4 (Frozen-artifact contract with paired independent-reader test catches Addendum D1). **Named at Layer 7 for BucketStats, NormalizerState, SpreadScaler, Kappa; tested when the first artifact writes.** Awaits Sprint execution.
 - H5 (Vocabulary Session runs faster than BOOTSTRAP's 2.5–4 hour estimate on a spec-mature project). **Falsified in wall-clock, confirmed in draft time.** First-pass draft took ~30 minutes; five review-pass rounds pushed the total to ~6 hours across two working days. The review discipline extended the schedule but the resulting vocabulary is defendable — worth the trade for a project whose vocabulary will govern 25+ sprints of code.
+
+---
+
+### 2026-08-10 — Sprint 006: tooling adoption closed
+
+**What happened.** ruff and mypy landed in `[dependency-groups] dev`. `[tool.ruff]` + `[tool.ruff.lint]` configured with E/F/I/UP/B/SIM/PT rules; `[tool.mypy]` set to strict on `src/price_space_llm`; `[[tool.mypy.overrides]]` handles the un-stubbed `sdd` module. Pytest gained `--strict-markers`, `--strict-config`, `-ra`, `filterwarnings = ["error"]`, `xfail_strict = true`. First pass ran the tools: 10 ruff findings (8 auto-fixed, 2 formatter re-flows, 1 line-too-long fixed by hand), 4 mypy findings (2 `Cannot subclass Any` from the sdd ignore-missing-imports — silenced with `# type: ignore[misc]` on the two subclasses; 2 missing dict type args — typed explicitly). Ruff's `UP` pack also modernised `timezone.utc` to `datetime.UTC` (Python 3.11+ shim). Second pass: ruff green, mypy green, 18 tests pass, wheel builds. Every item from the code review is now addressed across Sprints 003–006.
+
+**What worked.**
+
+- Auto-fix carried most of the ruff findings. 8-of-10 required no manual edit. The remaining two (one line-too-long, one format-only) were mechanical. The pattern generalises: adopt lint on an existing small codebase in one sprint, take the auto-fix output for free.
+- Mypy strict on the wrapper code caught two legitimate class of issue: unbounded generic types (`dict` without type args) and the sdd-subclass surface. The `# type: ignore[misc]` on the two class defs is targeted; the alternative was writing a `sdd.pyi` stub file. Stub deferred — write it if kit maintainers add `sdd` to a real distribution.
+- `filterwarnings = ["error"]` did not surface any pending deprecations. The stack (Python 3.13, hatchling 1.x, pytest 9.1, ruff 0.16, mypy 1.19) is quiet at this point in time. A Python 3.14 or a pytest 10 might change that; the sprint captures the current state.
+
+**What got in the way.**
+
+- Ruff's `UP` pack changed `from datetime import timezone` + `timezone.utc` to `from datetime import UTC` + `UTC.utcoffset(v)`. That's a Python 3.11+ shim (introduced in 3.11). The code was written targeting `>=3.11`, so the change is legitimate — but it's the sort of edit that would break a project pinned to Python 3.10. Worth naming in the KIT_DIARY as an antipattern to guard against: `UP` rules can silently push the minimum-Python floor. Not a problem here (pyproject already commits to 3.11); worth flagging for a hypothetical port.
+- Mypy's `--strict` flag is on/off; there's no gradient. Two lines of `# type: ignore[misc]` cover the sdd-subclass boundary and let the rest of the module benefit from strict. Cleaner would be `sdd.pyi`, but that's an sdd-kit-2 upstream contribution, not this project's problem.
+
+**What this says about the next kit version.**
+
+- **1. Tooling sprint pattern is worth naming.** The kit doesn't currently have a canonical shape for a "tooling adoption" sprint. Sprint 006's shape (add deps, configure sections, run tools, take auto-fix, resolve residuals) is small and reusable. Candidate for TECHNIQUES.md §1 addition, or a per-language project-class subsection (Python data-science class).
+- **2. `# type: ignore[misc]` at the un-stubbed-boundary is the right escape hatch.** A `sdd.pyi` stub file is the correct answer, but it's upstream work. Local `type: ignore` at the two class definitions is targeted, documented (via the module docstring naming the sdd dependency), and cheap to remove when stubs arrive. Candidate for TECHNIQUES.md § LLM-integration or § External SDK bridge mappings — the pattern generalises to any un-typed external dependency.
+
+**Hypothesis verdicts.**
+
+- H6 (locked vocab → first-pass-clean downstream). Sprint 006 second-pass (first pass surfaced findings; second closed). Half-credit. 5-for-7 overall counting each pass. Tentative.
+- **New H8.** Adopting ruff + mypy on an existing small codebase in one sprint is cheap because auto-fix does most of the work. Testable: how many findings did auto-fix carry vs. how many needed manual review? Sprint 006 data: 8-of-10 ruff (80% auto-fix), 0-of-4 mypy (mypy has no auto-fix). Confirmed for ruff, expected for mypy — future data points from other tooling-adoption sprints tell us more.
 
 ---
 

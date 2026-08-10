@@ -20,20 +20,21 @@ values read relative to session init, not to module import.
 module-level `__getattr__` shim (PEP 562), resolving to the same
 cached instance without touching disk at package import.
 """
+
 from __future__ import annotations
 
 import json
 import re
 import time
-from datetime import date, datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from uuid import UUID
 
 from sdd import Signal, SignalCapture, SignalEmitter, SignalVocabulary, capture
-
 
 Checker = Callable[[Any], None]
 
@@ -96,7 +97,7 @@ def _check_date_iso(v: Any) -> None:
 
 def _check_datetime_utc(v: Any) -> None:
     if isinstance(v, datetime):
-        if v.tzinfo is None or v.tzinfo.utcoffset(v) != timezone.utc.utcoffset(v):
+        if v.tzinfo is None or v.tzinfo.utcoffset(v) != UTC.utcoffset(v):
             raise ValueError(f"expected datetime with UTC tzinfo, got {v!r}")
         return
     if not isinstance(v, str):
@@ -105,7 +106,7 @@ def _check_datetime_utc(v: Any) -> None:
         parsed = datetime.fromisoformat(v.replace("Z", "+00:00"))
     except ValueError as e:
         raise ValueError(f"expected ISO-8601 datetime string, got {v!r}: {e}") from e
-    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) != timezone.utc.utcoffset(parsed):
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) != UTC.utcoffset(parsed):
         raise ValueError(f"expected UTC datetime, got {v!r}")
 
 
@@ -136,6 +137,7 @@ def _check_enum(allowed: frozenset[str]) -> Checker:
     def check(v: Any) -> None:
         if v not in allowed:
             raise ValueError(f"expected one of {sorted(allowed)}, got {v!r}")
+
     return check
 
 
@@ -148,6 +150,7 @@ def _check_list_of(inner: Checker) -> Checker:
                 inner(item)
             except ValueError as e:
                 raise ValueError(f"list index {i}: {e}") from e
+
     return check
 
 
@@ -164,6 +167,7 @@ def _check_dict_of(key_check: Checker, val_check: Checker) -> Checker:
                 val_check(val)
             except ValueError as e:
                 raise ValueError(f"dict value at {k!r}: {e}") from e
+
     return check
 
 
@@ -204,10 +208,10 @@ def _parse_type(type_str: str) -> Checker:
 # ── vocabulary + emitter ──────────────────────────────────────────────────────
 
 
-class StrictSignalVocabulary(SignalVocabulary):
+class StrictSignalVocabulary(SignalVocabulary):  # type: ignore[misc]
     """Vocabulary that enforces strict extras AND per-field type checks."""
 
-    def __init__(self, schema: dict[str, dict]):
+    def __init__(self, schema: dict[str, dict[str, Any]]) -> None:
         super().__init__(schema)
         self._field_checkers: dict[str, dict[str, Checker]] = {}
         for tag, entry in schema.items():
@@ -216,7 +220,7 @@ class StrictSignalVocabulary(SignalVocabulary):
                 for field_name, type_str in entry.get("field_types", {}).items()
             }
 
-    def validate(self, tag: str, payload: dict) -> None:
+    def validate(self, tag: str, payload: dict[str, Any]) -> None:
         super().validate(tag, payload)
         entry = self._schema[tag]
         allowed = set(entry.get("payload", [])) | set(entry.get("optional_payload", []))
@@ -254,7 +258,7 @@ def load_vocabulary(name: str = "0.1.json") -> StrictSignalVocabulary:
     return StrictSignalVocabulary(schema)
 
 
-class StrictSignalEmitter(SignalEmitter):
+class StrictSignalEmitter(SignalEmitter):  # type: ignore[misc]
     """SignalEmitter with an optional JSONL sink and a per-session clock reset.
 
     When `jsonl_sink` is set, every successful emit appends one JSON line to
@@ -292,7 +296,7 @@ class StrictSignalEmitter(SignalEmitter):
 
 @lru_cache(maxsize=1)
 def get_emitter() -> StrictSignalEmitter:
-    """Cached module singleton. First call reads the vocabulary; later calls return the same instance."""
+    """Cached module singleton. First call reads the vocabulary; later calls return the same."""
     return StrictSignalEmitter(load_vocabulary())
 
 
