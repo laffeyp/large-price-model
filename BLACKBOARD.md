@@ -76,7 +76,7 @@
 
 - **2026-08-09 (Agent)** — Reading the archived earlier product/tech-arch versions in full is deferred. Trigger to revisit: the Architect names a specific point of contention where the v4-vs-v2/v3 diff is load-bearing.
 
-- **2026-08-09 (Agent)** — Git init is deferred. The project is not currently a git repository (per environment). The kit does not require git, but several kit disciplines (test-look pre-commit hook, no-hardcoded-SPY grep hook, one-source-of-truth channel test as a per-commit gate) assume one. Trigger to revisit: before Sprint 001 (first code sprint after Vocabulary Session) — the Architect ratifies whether Sprint 001 initialises git or whether the pre-commit gates land later.
+- **2026-08-09 → 2026-08-10 (Agent, resolved 2026-08-10)** — Git init deferral closed. Architect ratified init immediately after Sprint 0 lock; repo initialised on `main` at project root; private GitHub remote created at https://github.com/laffeyp/PriceSpaceLLM (name convention `PriceSpaceLLM`, PascalCase per Architect); pushed. Initial commit 8feff8c carries Sprint 0's full artifact set. Pre-commit hooks (check_test_look.sh, SPY grep, one-source-of-truth channel test) authored in the sprint that first needs each — Sprint 3 or 4 candidates.
 
 - **2026-08-09 (Agent, from round-3 recast of round-2 P-015; expanded round 4)** — Domain-vs-runtime commitment for Step 7 (Layer 6). Step 7 will name, at minimum, these operators with source citations to specs/technical-architecture-v4.md:
   - **IngestionClient** — the runtime façade with rate limiter, cache, and source fallback. Cite tech-arch §4.2 `IngestionClient` class sketch.
