@@ -66,6 +66,8 @@
 
 *Agent appends one entry per sprint close. Append-only.*
 
+- **Sprint 001 (2026-08-10)** — package scaffold + signal emitter. Files: `pyproject.toml`, `src/price_space_llm/__init__.py`, `src/price_space_llm/signals.py`, `tests/__init__.py`, `tests/test_signals.py`. `uv sync --dev` installed the package plus pytest 9.1.1 into `.venv/`. Dual contract: signal (test-time only; SESSION_INIT and SESSION_COMPLETE not exercised in Sprint 1's four tests — all four exercise raise paths) + artifact (all five content assertions hold; four command-exit-code checks pass — `pytest tests/ -v` 4 passed, `python -c "print(len(emitter._vocab.tags()))"` prints 55, unknown-tag `emit` returns exit 1 with `Unknown signal tag`, unknown-payload `emit` returns exit 1 (traceback shows the field enumeration path via super().validate() raising on missing required first — the strict-extras path is exercised in the pytest `test_extra_payload_field_raises` where the full valid payload is provided plus the bogus field), SPY grep returns nothing). Observation contract: N/A (architecture-band). Rubber Duck Pass: three observations, all resolved-here (see sprint-close entry in Sprint tail).
+
 - **Sprint 0 (2026-08-10)** — Vocabulary Session closed. `signals/0.1.json` locked at v0.1 (55 tags across 14 categories, 31 entities, 4 session strata, 37 temporal invariants, 29 state-transition rules, 24 operators, 64 evidence constraints, 55 dual-contract audit pairings). `signals/0.1-rationale.md` signed (~2,400 words: intent, per-layer decisions with the five-round trajectory, dual-contract audit, project overrides, open v0.2 proposals, conventions). `signals/proposals.json` closed with three ENTITY_MERGE_PROPOSED accepted (P-001 Baseline+Ablation→Model, P-002 Distribution→Prediction, P-003 SpreadCalibration+KappaCalibration→CostCalibration). Five review passes drove the recasts: `vocab-0.1-layer-0-review.md`, `vocab-0.1-proposals-review.md`, `vocab-0.1-round-3-review.md`, `vocab-0.1-coverage-review.md`, `vocab-0.1-round-5-review.md`. Every halt-check PASSES at close: FK resolution 39/39, zero orphan tags, zero unreachable tags, no unnamed cycles, every incident carries a diagnostic constraint, every summary carries an outcome constraint. Dual contract: signal (vacuous — content sprint), artifact (signals/0.1.json parses as JSON; rationale doc signed; proposals.json marks all outcomes). Rubber Duck Pass: vacuous (no runtime signals to narrate; the Vocabulary Session's discipline is the founding act, not a runtime pass). Sprint 1 dispatches.
 
 ---
@@ -110,7 +112,7 @@
 
 *Agent maintains. Patterns to monitor across sprints. When the same observation surfaces in three consecutive sprints, escalate.*
 
-*(empty on project start)*
+- **2026-08-10 (Agent, from Sprint 001 Rubber Duck Pass observation 3)** — `SignalEmitter._session_start` is set at Python-process import, not at SESSION_INIT emit. All `t` values in traces will be relative to import time until this is fixed. Sprint 002's JSONL sink work fixes it: override `emit()` to reset `_session_start` when the tag is `SESSION_INIT`.
 
 ---
 
@@ -118,8 +120,20 @@
 
 *Agent maintains. Last 10 sprint closes; older entries roll into `## Built` as compressed paragraphs.*
 
-*(empty until Sprint 0 closes)*
+### Sprint 001 (2026-08-10, closed)
+
+- **Scope:** package scaffold + strict-validating signal emitter over the locked v0.1 vocabulary. Three code files + two ceremony inits.
+- **Dual contract:** signal (test-time only; no pipeline emission) + artifact (all content assertions hold; all four command exit codes match).
+- **Test outcome:** `uv run pytest tests/ -v` → 4 passed in 0.02s. Tests: `test_locked_vocabulary_loads_with_55_tags`, `test_unknown_tag_raises`, `test_missing_required_payload_raises`, `test_extra_payload_field_raises`.
+- **Rubber Duck Pass:**
+  - *Sequence narration.* No pipeline signals fired. The test harness dispatches four tests; each exercises a raise path in `StrictSignalEmitter.emit` via `StrictSignalVocabulary.validate`. Path 1 (unknown tag): `super().validate` raises at `if tag not in self._schema`. Paths 2 and 3 (missing required): `super().validate` raises at the `missing = [...]` check. Path 4 (extra field): `super().validate` returns clean; the subclass check catches the extra field.
+  - *Observation 1 (order violation, resolved-here).* The extra-field check runs after the required-field check. A payload with both a missing required field and an extra field surfaces the missing-required error first; the extra field never gets flagged in that pass. Not a bug — the required check is the more informative failure — but worth noting for Sprint 2 in case JSONL sink debugging wants the extras to surface earlier. Disposition: resolved-here (no code change; documented).
+  - *Observation 2 (payload anomaly, resolved-here).* The schema built by `load_vocabulary` carries a `note` field from the vocabulary JSON that the reference `SignalVocabulary` never reads. Dead field. Kept — a diagnostic printer in Sprint 2 or later may want to name the tag. Disposition: resolved-here.
+  - *Observation 3 (timing surprise, deferred).* The emitter's `_session_start` is set at module import time, not at SESSION_INIT time. `emit()`'s `t = time.monotonic() - self._session_start` reads relative to Python-process-start, not to the first SESSION_INIT. For Sprint 2's JSONL sink this will surface as odd `t` values. Fix: reset `_session_start` on any SESSION_INIT emit. Disposition: deferred to Sprint 2; added to `## Drift watchlist`.
+- **Files:** pyproject.toml, src/price_space_llm/__init__.py, src/price_space_llm/signals.py, tests/__init__.py, tests/test_signals.py.
+- **Artifacts installed side-effects:** `.venv/` (uv sync), `.pytest_cache/`. Both ignored per `.gitignore`.
+- **Closed:** clean.
 
 ---
 
-*BLACKBOARD.md — Price-Space LLM. COMPREHENSION_AFFIRMATION on file. Vocabulary Session preflight on file. Awaiting Architect "go" for Layer 0 per BOOTSTRAP Step 0.*
+*BLACKBOARD.md — Price-Space LLM. Sprint 0 (Vocabulary Session) and Sprint 001 (signal emitter) closed. Vocabulary locked at v0.1. Package `price_space_llm` installed via uv. Sprint 002 (JSONL sink + SESSION_INIT timing fix) next.*
