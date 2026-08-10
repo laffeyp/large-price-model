@@ -2,6 +2,7 @@
 import hashlib
 import json
 import time
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
@@ -28,11 +29,12 @@ VALID_SESSION_INIT_PAYLOAD = {
     "seed": 1337,
 }
 
-VALID_SESSION_COMPLETE_PAYLOAD = {
+# n_signals_emitted is computed at each call site; it depends on how many
+# tags each test emits and does not belong in a shared constant.
+VALID_SESSION_COMPLETE_PARTIAL = {
     "run_id": "test-run-001",
     "exit_code": 0,
     "elapsed_seconds": 0.001,
-    "n_signals_emitted": 2,
 }
 
 VALID_CHECKPOINT_WRITTEN_PAYLOAD = {
@@ -52,9 +54,10 @@ VALID_CHECKPOINT_WRITTEN_PAYLOAD = {
 # Validator tests ---------------------------------------------------------------
 
 
-def test_locked_vocabulary_loads_with_55_tags():
+def test_locked_vocabulary_loads_all_tags():
     vocab = load_vocabulary()
-    assert len(vocab.tags()) == 55
+    raw = json.loads(files("price_space_llm._vocab").joinpath("0.1.json").read_text(encoding="utf-8"))
+    assert len(vocab.tags()) == len(raw["tags"])
 
 
 def test_unknown_tag_raises():
@@ -72,7 +75,7 @@ def test_extra_payload_field_raises():
         emitter.emit("SESSION_INIT", bogus_field="not allowed", **VALID_SESSION_INIT_PAYLOAD)
 
 
-# Typed-payload enforcement tests (Sprint 004) ---------------------------------
+# Typed-payload enforcement tests ----------------------------------------------
 
 
 def test_enum_value_outside_declared_set_raises():
@@ -106,8 +109,6 @@ def test_bool_masquerading_as_int_raises():
 
 
 def test_uuid_parser_rejects_malformed():
-    # No field in v0.1 currently types as `uuid` (trade_id is entity_ref<Trade>),
-    # so the uuid checker is exercised at parser level rather than through emit().
     from price_space_llm.signals import _parse_type
     uuid_check = _parse_type("uuid")
     uuid_check("550e8400-e29b-41d4-a716-446655440000")  # valid, no raise
@@ -131,9 +132,8 @@ def test_datetime_utc_malformed_raises():
 
 
 def test_date_iso_malformed_raises():
-    # TRADING_SESSION_STARTED requires session_date: date_iso
     bad = {
-        "session_date": "2024/06/01",  # slashes, not dashes
+        "session_date": "2024/06/01",
         "first_bar_timestamp": "2024-06-01T13:30:00+00:00",
         "target_symbol": "SPY",
     }
@@ -142,7 +142,6 @@ def test_date_iso_malformed_raises():
 
 
 def test_list_element_type_mismatch_raises():
-    # BUCKET_FREQUENCY_DRIFT_MEASURED has train_frequency_by_bucket: list<float>
     bad = {
         "run_id": "r1",
         "split": "val",
@@ -156,10 +155,9 @@ def test_list_element_type_mismatch_raises():
 
 
 def test_valid_payload_still_passes_after_type_upgrade():
-    # A canary — the strictness upgrade should not break the base case.
     e = StrictSignalEmitter(load_vocabulary())
     e.emit("SESSION_INIT", **VALID_SESSION_INIT_PAYLOAD)
-    e.emit("SESSION_COMPLETE", **VALID_SESSION_COMPLETE_PAYLOAD)
+    e.emit("SESSION_COMPLETE", n_signals_emitted=2, **VALID_SESSION_COMPLETE_PARTIAL)
 
 
 # JSONL sink tests --------------------------------------------------------------
@@ -170,8 +168,7 @@ def test_jsonl_sink_writes_one_line_per_emit(tmp_path: Path):
     e = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink)
     e.emit("SESSION_INIT", **VALID_SESSION_INIT_PAYLOAD)
     e.emit("CHECKPOINT_WRITTEN", **VALID_CHECKPOINT_WRITTEN_PAYLOAD)
-    complete = {**VALID_SESSION_COMPLETE_PAYLOAD, "n_signals_emitted": 3}
-    e.emit("SESSION_COMPLETE", **complete)
+    e.emit("SESSION_COMPLETE", n_signals_emitted=3, **VALID_SESSION_COMPLETE_PARTIAL)
     lines = sink.read_text().strip().split("\n")
     assert len(lines) == 3
 
@@ -180,7 +177,7 @@ def test_session_init_and_complete_bookend_the_trace(tmp_path: Path):
     sink = tmp_path / "signals.jsonl"
     e = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink)
     e.emit("SESSION_INIT", **VALID_SESSION_INIT_PAYLOAD)
-    e.emit("SESSION_COMPLETE", **VALID_SESSION_COMPLETE_PAYLOAD)
+    e.emit("SESSION_COMPLETE", n_signals_emitted=2, **VALID_SESSION_COMPLETE_PARTIAL)
     lines = [json.loads(line) for line in sink.read_text().strip().split("\n")]
     assert lines[0]["tag"] == "SESSION_INIT"
     assert lines[-1]["tag"] == "SESSION_COMPLETE"
@@ -189,7 +186,17 @@ def test_session_init_and_complete_bookend_the_trace(tmp_path: Path):
 def test_session_init_resets_the_clock(tmp_path: Path):
     sink = tmp_path / "signals.jsonl"
     e = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink)
-    time.sleep(0.05)  # emitter has been alive; without a reset t would read ~0.05
+    time.sleep(0.05)
     e.emit("SESSION_INIT", **VALID_SESSION_INIT_PAYLOAD)
     line = json.loads(sink.read_text().strip())
-    assert line["t"] < 0.005
+    # Threshold 0.04 comfortably distinguishes a reset (t < 1ms typically)
+    # from no-reset (t >= 0.05 from the pre-emit sleep). 40x noise margin.
+    assert line["t"] < 0.04
+
+
+def test_sink_parent_created_on_first_emit_not_construction(tmp_path: Path):
+    sink = tmp_path / "nested" / "dirs" / "signals.jsonl"
+    e = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink)
+    assert not sink.parent.exists()
+    e.emit("SESSION_INIT", **VALID_SESSION_INIT_PAYLOAD)
+    assert sink.parent.exists()

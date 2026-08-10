@@ -14,6 +14,11 @@ call site (schema at the speaker's mouth, per PRINCIPLES.md commitment 2).
 `StrictSignalEmitter` adds an optional per-emit JSONL sink and
 resets the internal clock when SESSION_INIT fires so trace `t`
 values read relative to session init, not to module import.
+
+`get_emitter()` is the module singleton factory (cached). Import-time
+`from price_space_llm.signals import emitter` still works via the
+module-level `__getattr__` shim (PEP 562), resolving to the same
+cached instance without touching disk at package import.
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ import json
 import re
 import time
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable
@@ -174,7 +180,6 @@ def _parse_type(type_str: str) -> Checker:
         return _check_list_of(_parse_type(type_str[5:-1]))
     if type_str.startswith("dict<") and type_str.endswith(">"):
         inner = type_str[5:-1]
-        # split on the top-level comma
         depth = 0
         split = None
         for i, c in enumerate(inner):
@@ -190,8 +195,9 @@ def _parse_type(type_str: str) -> Checker:
         k = inner[:split].strip()
         v = inner[split + 1 :].strip()
         return _check_dict_of(_parse_type(k), _parse_type(v))
-    # Unknown type — accept anything, but log via the schema at load time
-    # so a future audit surfaces it. Fall back to str check as a safety net.
+    # Unknown type — permissive str fallback so an unrecognised future type
+    # does not break the loader. A future vocabulary bump adding a genuine
+    # new type should also add its entry to _TYPE_CHECKERS.
     return _check_str
 
 
@@ -203,7 +209,6 @@ class StrictSignalVocabulary(SignalVocabulary):
 
     def __init__(self, schema: dict[str, dict]):
         super().__init__(schema)
-        # Precompute a per-tag map of field name → type checker.
         self._field_checkers: dict[str, dict[str, Checker]] = {}
         for tag, entry in schema.items():
             self._field_checkers[tag] = {
@@ -225,7 +230,7 @@ class StrictSignalVocabulary(SignalVocabulary):
         for field_name, value in payload.items():
             checker = checkers.get(field_name)
             if checker is None:
-                continue  # field not typed in the schema (rare; safety net)
+                continue
             try:
                 checker(value)
             except ValueError as e:
@@ -265,20 +270,38 @@ class StrictSignalEmitter(SignalEmitter):
     ) -> None:
         super().__init__(vocabulary, max_buffer=max_buffer)
         self._jsonl_sink = jsonl_sink
-        if jsonl_sink is not None:
-            jsonl_sink.parent.mkdir(parents=True, exist_ok=True)
+        self._sink_prepared = False
 
     def emit(self, tag: str, **payload: Any) -> None:
         if tag == "SESSION_INIT":
             self._session_start = time.monotonic()
         super().emit(tag, **payload)
         if self._jsonl_sink is not None:
-            signal = self._buffer[-1]
+            if not self._sink_prepared:
+                self._jsonl_sink.parent.mkdir(parents=True, exist_ok=True)
+                self._sink_prepared = True
+            signal = Signal(
+                tag=tag,
+                category=self._vocab.category_of(tag),
+                payload=payload,
+                t=time.monotonic() - self._session_start,
+            )
             with self._jsonl_sink.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(signal.to_dict()) + "\n")
 
 
-emitter: StrictSignalEmitter = StrictSignalEmitter(load_vocabulary())
+@lru_cache(maxsize=1)
+def get_emitter() -> StrictSignalEmitter:
+    """Cached module singleton. First call reads the vocabulary; later calls return the same instance."""
+    return StrictSignalEmitter(load_vocabulary())
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 shim: `from price_space_llm.signals import emitter` returns get_emitter()."""
+    if name == "emitter":
+        return get_emitter()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "Signal",
@@ -286,6 +309,6 @@ __all__ = [
     "StrictSignalEmitter",
     "StrictSignalVocabulary",
     "capture",
-    "emitter",
+    "get_emitter",
     "load_vocabulary",
 ]
