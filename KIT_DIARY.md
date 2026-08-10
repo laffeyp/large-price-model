@@ -25,9 +25,10 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 |---|---|---|---|
 | H1 | The kit's Data science / ML training class techniques (per-step / per-epoch / per-run signal strata, metric snapshot as artifact, determinism budget) cover 80%+ of what a training-loop sprint needs, without invention. | _pending_ | — |
 | H2 | The dual contract's observation contract, expressed for a non-UI project as "expected runtime signals in JSONL + expected metric artifact + expected exit code," catches the class of defects that ship on internal check surfaces alone (per Addendum D1: signals drive but cannot grade). | _pending_ | — |
-| H3 | Bridge-mapping-first for external SDKs (PyTorch, MCP tools, Hydra, Polars, W&B) prevents the guess-and-iterate loop that soundfield rounds 13/20-26 documented. Cost: authoring the bridge mapping is an extra Sprint-0-adjacent activity per SDK. Benefit: no sprint spent authoring code against a symbol the SDK does not expose. | _pending_ | — |
+| H3 | Bridge-mapping-first for external SDKs (PyTorch, MCP tools, Hydra, Polars, W&B) prevents the guess-and-iterate loop that soundfield rounds 13/20-26 documented. Cost: authoring the bridge mapping is an extra Sprint-0-adjacent activity per SDK. Benefit: no sprint spent authoring code against a symbol the SDK does not expose. | _partially_ | Sprint 001 authored no code against un-mapped SDKs (all imports vendored or stdlib). |
 | H4 | The frozen-artifact contract (bucket_stats.json, normalizers.pt, spread_scaler.json, kappa.json) held by a paired "any consumer reads from this file, never recomputes" test is the pattern that stops the internal-consistency-but-external-inconsistency failure (Addendum D1's `AVAudioFile.read(into:)` returning short). | _pending_ | — |
-| H5 | For a project whose spec has already been reviewed and rewritten (v4 after v3 after v2 after v1), the Vocabulary Session runs faster than BOOTSTRAP.md's 2.5–4 hour estimate — because the spec's language is already stable and the entities are already named. Alternate: the review pass surfaced gaps the Vocabulary Session will re-surface. | _pending_ | — |
+| H5 | For a project whose spec has already been reviewed and rewritten (v4 after v3 after v2 after v1), the Vocabulary Session runs faster than BOOTSTRAP.md's 2.5–4 hour estimate — because the spec's language is already stable and the entities are already named. Alternate: the review pass surfaced gaps the Vocabulary Session will re-surface. | _falsified_ | Wall clock ~6h across five review rounds on 2026-08-09→10; draft time ~30min. Review discipline paid for the extension. |
+| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprint 001 closed first-pass clean. Needs 5-10 more sprint closes to confirm. |
 
 ---
 
@@ -67,6 +68,38 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 - H3 (Bridge-mapping-first prevents guess-and-iterate). **Not tested this sprint.** Sprint 0 authored no code against SDKs. Sprint 1 tests.
 - H4 (Frozen-artifact contract with paired independent-reader test catches Addendum D1). **Named at Layer 7 for BucketStats, NormalizerState, SpreadScaler, Kappa; tested when the first artifact writes.** Awaits Sprint execution.
 - H5 (Vocabulary Session runs faster than BOOTSTRAP's 2.5–4 hour estimate on a spec-mature project). **Falsified in wall-clock, confirmed in draft time.** First-pass draft took ~30 minutes; five review-pass rounds pushed the total to ~6 hours across two working days. The review discipline extended the schedule but the resulting vocabulary is defendable — worth the trade for a project whose vocabulary will govern 25+ sprints of code.
+
+---
+
+### 2026-08-10 — Sprint 001: signal emitter closed
+
+**What happened.** Three code files landed: `pyproject.toml`, `src/price_space_llm/signals.py`, `tests/test_signals.py`. `uv sync --dev` installed the package plus pytest into `.venv/`. Four tests passed in 0.02s. `StrictSignalVocabulary` extends `sdd.SignalVocabulary` with the strict-extras posture WORKING_AGREEMENT commits to. The module-level `emitter` singleton loads the 55-tag locked vocabulary at import.
+
+**What worked.**
+
+- Sprint 001 executed on the first pass. No halts, no revisions. The vocabulary lock from Sprint 0 removed the largest class of question — "what should I emit and with what payload?" — before code authoring began. That confirms the value of Sprint-0-as-founding-act.
+- The plan-mode split (6 files → 3) that surfaced during Architect review was the right cut. Sprint 001 landed one concept; Sprint 002 lands the next. If I had shipped the JSONL sink in the same sprint, the RubberDuckPass ambiguity (six categories are for trace observations; the sink work generates observations of a different class) would have compounded.
+- `pyproject.toml`'s `[tool.hatch.build.targets.wheel.force-include]` gave `from sdd import ...` global reach without a `sys.path` shim in `signals.py`. Kit convention (sdd-kit-2 is read-only) preserved. Would have been the cleanest first attempt if I had reached for hatchling documentation instead of proposing "vendor vs shim" as a false dichotomy.
+
+**What got in the way.**
+
+- I framed a false dichotomy at plan-mode review ("vendor vs shim") when the actual question was mechanical (how does the import work). The Architect caught it. Lesson: check the shape of a question before offering the Architect a choice; if the choice is really about mechanics, pick the sensible default and note it.
+- My initial Sprint 001 Rubber Duck Pass entry labelled code-side notes with the six trace-observation categories. Mislabelling. The RubberDuckPass's six categories walk a **signal trace**; when a sprint's tests exercise raise paths only and emit no successful signals, the pass is structurally vacuous. Code-side notes get filed differently — as project-notes or drift-watchlist entries. Corrected in-file 2026-08-10.
+- The auditing of the sprint against the twelve hard rules ran only when the Architect explicitly asked ("Do a quick check"). The kit does not require a per-sprint hard-rule audit; adding one would grow the ceremony. But a mental checklist run at sprint close would have caught the RubberDuckPass mislabel without the Architect prompt.
+
+**What this says about the next kit version.**
+
+- **1. RubberDuckPass mode split: trace-pass vs code-pass.** The kit's six-category pass is designed for signal traces. Sprints whose tests exercise raise paths only, or that author no runtime code that emits (architecture-band sprints), have no trace to walk. The pass is vacuous by design; the code-side notes those sprints surface do not fit the six categories. Candidate: name the vacuous case explicitly in the RubberDuckPass procedure (AGENTS.md § Sprint close) and describe the code-note filing pattern for architecture-band sprints.
+- **2. Plan-mode "false dichotomy" antipattern.** The Agent's tendency to frame a mechanical question as an Architect choice generates ceremony. Rule of thumb: if the answer is "the sensible default plus a one-line note in the sprint card," the Agent picks and moves on. Candidate for TECHNIQUES.md §1 error-handling.
+
+**Hypothesis verdicts.**
+
+- H1 (Data science class techniques cover 80%+ without invention). Not exercised — Sprint 001 was package-and-emitter scaffold, not a training-loop sprint.
+- H2 (dual contract for non-UI catches D1 class). Not exercised — Sprint 001 had vacuous signal contract.
+- H3 (bridge-mapping-first prevents guess-and-iterate). **Confirmed partially.** Sprint 001 authored no code against un-mapped SDKs (PyTorch, MCP, Hydra, Pydantic, Polars, W&B). The `sdd` import is vendored, not external. Sprint 002 tests H3 more directly if it adds a Pydantic dependency.
+- H4 (frozen-artifact contract with paired reader test). Not yet exercised — no frozen artifacts written this sprint.
+- H5 (Vocabulary Session runs faster on spec-mature project). N/A — this is a code sprint, not a vocab session.
+- **New H6.** Sprint 001's first-pass-clean success suggests: when Sprint 0 lands a real vocabulary lock, downstream sprints iterate cleanly because the vocabulary answers "what to emit" before code writing begins. Testable via base rate of first-pass-clean closes across Sprints 002-010. Status: tentative.
 
 ---
 
