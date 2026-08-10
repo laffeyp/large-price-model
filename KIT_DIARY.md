@@ -28,7 +28,7 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 | H3 | Bridge-mapping-first for external SDKs (PyTorch, MCP tools, Hydra, Polars, W&B) prevents the guess-and-iterate loop that soundfield rounds 13/20-26 documented. Cost: authoring the bridge mapping is an extra Sprint-0-adjacent activity per SDK. Benefit: no sprint spent authoring code against a symbol the SDK does not expose. | _partially_ | Sprint 001 authored no code against un-mapped SDKs (all imports vendored or stdlib). |
 | H4 | The frozen-artifact contract (bucket_stats.json, normalizers.pt, spread_scaler.json, kappa.json) held by a paired "any consumer reads from this file, never recomputes" test is the pattern that stops the internal-consistency-but-external-inconsistency failure (Addendum D1's `AVAudioFile.read(into:)` returning short). | _pending_ | — |
 | H5 | For a project whose spec has already been reviewed and rewritten (v4 after v3 after v2 after v1), the Vocabulary Session runs faster than BOOTSTRAP.md's 2.5–4 hour estimate — because the spec's language is already stable and the entities are already named. Alternate: the review pass surfaced gaps the Vocabulary Session will re-surface. | _falsified_ | Wall clock ~6h across five review rounds on 2026-08-09→10; draft time ~30min. Review discipline paid for the extension. |
-| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprint 001 closed first-pass clean. Needs 5-10 more sprint closes to confirm. |
+| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprints 001 and 002 closed first-pass clean. 2-for-2. Needs 5+ more sprint closes to confirm. |
 
 ---
 
@@ -68,6 +68,33 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 - H3 (Bridge-mapping-first prevents guess-and-iterate). **Not tested this sprint.** Sprint 0 authored no code against SDKs. Sprint 1 tests.
 - H4 (Frozen-artifact contract with paired independent-reader test catches Addendum D1). **Named at Layer 7 for BucketStats, NormalizerState, SpreadScaler, Kappa; tested when the first artifact writes.** Awaits Sprint execution.
 - H5 (Vocabulary Session runs faster than BOOTSTRAP's 2.5–4 hour estimate on a spec-mature project). **Falsified in wall-clock, confirmed in draft time.** First-pass draft took ~30 minutes; five review-pass rounds pushed the total to ~6 hours across two working days. The review discipline extended the schedule but the resulting vocabulary is defendable — worth the trade for a project whose vocabulary will govern 25+ sprints of code.
+
+---
+
+### 2026-08-10 — Sprint 002: JSONL sink closed
+
+**What happened.** `StrictSignalEmitter.__init__` gained `jsonl_sink: Path | None`. `emit()` pre-validates through `_vocab.validate` (raising before any side effect), resets `_session_start` when the tag is `SESSION_INIT`, calls `super().emit()`, and appends one JSON line to the sink when set. Three new tests exercise the sink line count, boundary-tag identity, and the clock reset. `uv run pytest tests/ -v` → 7 passed in 0.09s. Sprint 001 code note 3 closed.
+
+**What worked.**
+
+- The Rubber Duck Pass had a real trace to walk this time. Test 5's sequence narration was three-lines-mechanical: SESSION_INIT at t=0, CHECKPOINT_WRITTEN at t≈0.0001, SESSION_COMPLETE at t≈0.0002. The pass surfaced one payload anomaly (n_signals_emitted is caller-set, so a lying caller lies in the trace). That is exactly what the six-category pass is designed to find.
+- Sprint 001's drift-watchlist entry closed cleanly. The `_session_start` reset is one line inside `emit()` and one test that sleeps and reads back a small `t`. The bug that would have surfaced as odd `t` values in every future sim run gets fixed once, verifiably.
+- H6 gains a second first-pass-clean data point. Sprint 002 landed on the first pass. Two-for-two is not yet confirmation but the trend runs the right way.
+
+**What got in the way.**
+
+- Pre-validating in the subclass `emit()` duplicates validation work — `super().emit()` calls `_vocab.validate` again. Small perf cost, not measurable at this scale. Alternative was to reset the clock after `super().emit()` returns and then patch the last signal's `t` field, which is uglier. Chose the honest duplication over the surgical hack.
+- The Rubber Duck Pass observation surfaced a bug shape the vocabulary encourages but the code does not catch: SESSION_COMPLETE.n_signals_emitted is caller-set. This is a general class — many summary tags require the caller to correctly count things the emitter already knows. Candidate for a helper method in a future ergonomics sprint (`close_session()` that reads the buffer length and closes SESSION_COMPLETE for you).
+
+**What this says about the next kit version.**
+
+- **1. Pre-validate-then-side-effect is the right order for wrapper emit methods.** The alternative (side effect first, roll back on validation failure) is fragile. TECHNIQUES.md §1 "Schema enforced at the speaker's mouth" implies but does not state this ordering rule for wrapper implementations. Worth adding.
+- **2. Summary tags with caller-computed counts are a payload-anomaly hazard.** SESSION_COMPLETE.n_signals_emitted, ALIGNMENT_RUN_COMPLETED.total_rows, EPOCH_COMPLETED.n_steps — all caller-set. All can lie. Candidate: helper methods on the emitter that close summary tags with computed values from the buffer, so the caller cannot lie by accident.
+
+**Hypothesis verdicts.**
+
+- H2 (dual contract for non-UI catches D1 class). Not yet exercised at scale — Sprint 002's sink is the first artifact-on-disk the observation contract verifies. Real test comes when a training run misreports metrics and the observation catches it.
+- H6 (locked vocab → first-pass-clean downstream). Two-for-two. Tentative moves toward partially-confirmed at three-for-three.
 
 ---
 

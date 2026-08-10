@@ -66,6 +66,8 @@
 
 *Agent appends one entry per sprint close. Append-only.*
 
+- **Sprint 002 (2026-08-10)** — JSONL sink + SESSION_INIT clock reset. Modified `src/price_space_llm/signals.py` (StrictSignalEmitter gains `jsonl_sink: Path | None` constructor arg; `emit()` pre-validates via `_vocab.validate` then resets `_session_start` on `SESSION_INIT` then calls `super().emit()` then appends one JSON line to the sink when set) and `tests/test_signals.py` (three new tests appended). Dual contract: signal (SESSION_INIT + CHECKPOINT_WRITTEN + SESSION_COMPLETE fired at test time with valid payloads; strict-extras posture preserved) + artifact (both content assertions hold; two command exit codes pass — `pytest tests/ -v` → 7 passed in 0.09s, sink smoke check prints `lines: 2`). Observation contract: three tests exercise sink file line count, boundary tag identity, and clock-reset invariant (`t < 0.005` after a 0.05s pre-emit sleep). Rubber Duck Pass: one live signal trace observation, resolved-here (see Sprint tail). Fixes Sprint 001 code note 3 (drift-watchlist entry closed).
+
 - **Sprint 001 (2026-08-10)** — package scaffold + signal emitter. Files: `pyproject.toml`, `src/price_space_llm/__init__.py`, `src/price_space_llm/signals.py`, `tests/__init__.py`, `tests/test_signals.py`. `uv sync --dev` installed the package plus pytest 9.1.1 into `.venv/`. Dual contract: signal (test-time only; SESSION_INIT and SESSION_COMPLETE not exercised in Sprint 1's four tests — all four exercise raise paths) + artifact (all five content assertions hold; four command-exit-code checks pass — `pytest tests/ -v` 4 passed, `python -c "print(len(emitter._vocab.tags()))"` prints 55, unknown-tag `emit` returns exit 1 with `Unknown signal tag`, unknown-payload `emit` returns exit 1 (traceback shows the field enumeration path via super().validate() raising on missing required first — the strict-extras path is exercised in the pytest `test_extra_payload_field_raises` where the full valid payload is provided plus the bogus field), SPY grep returns nothing). Observation contract: N/A (architecture-band). Rubber Duck Pass: structurally vacuous (no runtime trace to walk); three code-side notes filed instead (see Sprint tail).
 
 - **Sprint 0 (2026-08-10)** — Vocabulary Session closed. `signals/0.1.json` locked at v0.1 (55 tags across 14 categories, 31 entities, 4 session strata, 37 temporal invariants, 29 state-transition rules, 24 operators, 64 evidence constraints, 55 dual-contract audit pairings). `signals/0.1-rationale.md` signed (~2,400 words: intent, per-layer decisions with the five-round trajectory, dual-contract audit, project overrides, open v0.2 proposals, conventions). `signals/proposals.json` closed with three ENTITY_MERGE_PROPOSED accepted (P-001 Baseline+Ablation→Model, P-002 Distribution→Prediction, P-003 SpreadCalibration+KappaCalibration→CostCalibration). Five review passes drove the recasts: `vocab-0.1-layer-0-review.md`, `vocab-0.1-proposals-review.md`, `vocab-0.1-round-3-review.md`, `vocab-0.1-coverage-review.md`, `vocab-0.1-round-5-review.md`. Every halt-check PASSES at close: FK resolution 39/39, zero orphan tags, zero unreachable tags, no unnamed cycles, every incident carries a diagnostic constraint, every summary carries an outcome constraint. Dual contract: signal (vacuous — content sprint), artifact (signals/0.1.json parses as JSON; rationale doc signed; proposals.json marks all outcomes). Rubber Duck Pass: vacuous (no runtime signals to narrate; the Vocabulary Session's discipline is the founding act, not a runtime pass). Sprint 1 dispatches.
@@ -112,13 +114,27 @@
 
 *Agent maintains. Patterns to monitor across sprints. When the same observation surfaces in three consecutive sprints, escalate.*
 
-- **2026-08-10 (Agent, from Sprint 001 code note 3)** — `SignalEmitter._session_start` is set at Python-process import, not at SESSION_INIT emit. All `t` values in traces will be relative to import time until this is fixed. Sprint 002's JSONL sink work fixes it: override `emit()` to reset `_session_start` when the tag is `SESSION_INIT`.
+- **2026-08-10 (Agent, from Sprint 001 code note 3, resolved Sprint 002)** — `SignalEmitter._session_start` was set at Python import, not at SESSION_INIT emit. Fixed 2026-08-10 in Sprint 002: `StrictSignalEmitter.emit` now resets `_session_start` when tag == `SESSION_INIT`. Verified by `test_session_init_resets_the_clock`.
+
+- **2026-08-10 (Agent, from Sprint 002 Rubber Duck Pass)** — `SESSION_COMPLETE.n_signals_emitted` is caller-set, not computed. If the caller passes the wrong number, no check catches it. Revisit trigger: an ergonomics sprint that adds `StrictSignalEmitter.close_session()` helper computing the count from the buffer.
 
 ---
 
 ## Sprint tail
 
 *Agent maintains. Last 10 sprint closes; older entries roll into `## Built` as compressed paragraphs.*
+
+### Sprint 002 (2026-08-10, closed)
+
+- **Scope:** JSONL sink + SESSION_INIT clock reset. Two files modified.
+- **Dual contract:** signal (SESSION_INIT + CHECKPOINT_WRITTEN + SESSION_COMPLETE fire at test time; strict-extras validation preserved) + artifact (`uv run pytest tests/ -v` → 7 passed in 0.09s; sink smoke check writes 2 lines as expected).
+- **Observation contract:** three sink-verifying tests pass. `test_jsonl_sink_writes_one_line_per_emit` (3 lines for 3 emits), `test_session_init_and_complete_bookend_the_trace` (first line tag == SESSION_INIT, last line tag == SESSION_COMPLETE), `test_session_init_resets_the_clock` (t < 0.005 after a 0.05s pre-emit sleep).
+- **Rubber Duck Pass:**
+  - *Sequence narration.* Test 5 emits SESSION_INIT at t=0 (post-reset), CHECKPOINT_WRITTEN at t≈0.0001, SESSION_COMPLETE at t≈0.0002. Sink file grows by exactly one line per emit. Test 6 verifies boundary identity. Test 7 waits 0.05s post-construction, emits SESSION_INIT, and reads back t < 0.005 — confirms the clock reset happens at emit time, not at emitter construction.
+  - *Observation 1 (payload anomaly, resolved-here).* `SESSION_COMPLETE.n_signals_emitted` is set by the caller, not computed by the emitter. Two tests set it to 2, one to 3, all matching the actual emit count. If a caller sets it wrong, the trace lies and no check catches it. Fix candidate: SESSION_COMPLETE should have a helper on StrictSignalEmitter that computes n_signals_emitted from the buffer. Not this sprint; added to Drift watchlist for a later ergonomics sprint.
+  - No other observations across the six categories.
+- **Files:** src/price_space_llm/signals.py (modified), tests/test_signals.py (modified).
+- **Closed:** clean. Fixes Sprint 001 code note 3; drift-watchlist entry on `_session_start` timing closed.
 
 ### Sprint 001 (2026-08-10, closed)
 

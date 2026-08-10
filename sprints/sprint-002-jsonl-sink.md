@@ -5,7 +5,7 @@
 ```yaml
 ---
 id: 002
-status: pending
+status: closed
 phase: 1
 pass_kind: functional
 ---
