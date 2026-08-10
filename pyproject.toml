@@ -14,6 +14,9 @@ packages = ["src/price_space_llm"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "sdd-kit-2/lib/sdd.py" = "sdd.py"
+# signals/0.1.json ships automatically via the src/price_space_llm/_vocab/
+# symlink discovered by [tool.hatch.build.targets.wheel] packages above.
+# hatchling follows the symlink and copies the target's contents.
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "sdd-kit-2/lib"]

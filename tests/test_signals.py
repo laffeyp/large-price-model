@@ -1,4 +1,4 @@
-"""Sprint 001 + 002 tests — StrictSignalEmitter over the locked v0.1 vocabulary."""
+"""Tests for the strict signal emitter over the locked vocabulary."""
 import json
 import time
 from pathlib import Path
@@ -43,7 +43,7 @@ VALID_CHECKPOINT_WRITTEN_PAYLOAD = {
 }
 
 
-# Sprint 001 tests --------------------------------------------------------------
+# Validator tests ---------------------------------------------------------------
 
 
 def test_locked_vocabulary_loads_with_55_tags():
@@ -66,7 +66,7 @@ def test_extra_payload_field_raises():
         emitter.emit("SESSION_INIT", bogus_field="not allowed", **VALID_SESSION_INIT_PAYLOAD)
 
 
-# Sprint 002 tests --------------------------------------------------------------
+# JSONL sink tests --------------------------------------------------------------
 
 
 def test_jsonl_sink_writes_one_line_per_emit(tmp_path: Path):

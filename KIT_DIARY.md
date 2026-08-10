@@ -28,7 +28,7 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 | H3 | Bridge-mapping-first for external SDKs (PyTorch, MCP tools, Hydra, Polars, W&B) prevents the guess-and-iterate loop that soundfield rounds 13/20-26 documented. Cost: authoring the bridge mapping is an extra Sprint-0-adjacent activity per SDK. Benefit: no sprint spent authoring code against a symbol the SDK does not expose. | _partially_ | Sprint 001 authored no code against un-mapped SDKs (all imports vendored or stdlib). |
 | H4 | The frozen-artifact contract (bucket_stats.json, normalizers.pt, spread_scaler.json, kappa.json) held by a paired "any consumer reads from this file, never recomputes" test is the pattern that stops the internal-consistency-but-external-inconsistency failure (Addendum D1's `AVAudioFile.read(into:)` returning short). | _pending_ | — |
 | H5 | For a project whose spec has already been reviewed and rewritten (v4 after v3 after v2 after v1), the Vocabulary Session runs faster than BOOTSTRAP.md's 2.5–4 hour estimate — because the spec's language is already stable and the entities are already named. Alternate: the review pass surfaced gaps the Vocabulary Session will re-surface. | _falsified_ | Wall clock ~6h across five review rounds on 2026-08-09→10; draft time ~30min. Review discipline paid for the extension. |
-| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprints 001 and 002 closed first-pass clean. 2-for-2. Needs 5+ more sprint closes to confirm. |
+| H6 | A locked vocabulary at Sprint 0 produces first-pass-clean sprint closes downstream because "what to emit" is answered before code writing begins. | _tentative_ | Sprints 001, 002 first-pass clean. Sprint 003 first-pass at code layer, second-pass at build layer (duplicate pyproject destination). 2-for-2 code, 2-for-3 overall. |
 
 ---
 
@@ -68,6 +68,32 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 - H3 (Bridge-mapping-first prevents guess-and-iterate). **Not tested this sprint.** Sprint 0 authored no code against SDKs. Sprint 1 tests.
 - H4 (Frozen-artifact contract with paired independent-reader test catches Addendum D1). **Named at Layer 7 for BucketStats, NormalizerState, SpreadScaler, Kappa; tested when the first artifact writes.** Awaits Sprint execution.
 - H5 (Vocabulary Session runs faster than BOOTSTRAP's 2.5–4 hour estimate on a spec-mature project). **Falsified in wall-clock, confirmed in draft time.** First-pass draft took ~30 minutes; five review-pass rounds pushed the total to ~6 hours across two working days. The review discipline extended the schedule but the resulting vocabulary is defendable — worth the trade for a project whose vocabulary will govern 25+ sprints of code.
+
+---
+
+### 2026-08-10 — Sprint 003: code-review pre-fixes closed
+
+**What happened.** `reviews/code-best-practices-round-1.md` surfaced a ship-blocker (module-level `_VOCAB_PATH` walk-up fails under wheel install) plus three one-liners. Sprint 003 fixed the ship-blocker by moving vocabulary loading to `importlib.resources` against a `price_space_llm._vocab` sub-resource, with the file exposed via a symlink at `src/price_space_llm/_vocab/0.1.json` → `../../../signals/0.1.json`. Wheel builds clean. Fresh-venv install imports and reads `tag count: 55`. Six other findings deferred to Sprints 004-006 with explicit rationale in the sprint card.
+
+**What worked.**
+
+- The symlink approach unified editable and wheel install without duplicating the vocabulary file. `signals/0.1.json` stays at project root as the naming convention every doc references; hatchling follows the symlink at build time and packages the target's contents. One source of truth.
+- The review's own recommendation to add force-include for the JSON turned out to be wrong once the symlink was in place — hatchling raised "second file added at same path" on the first build. Caught and fixed on the spot. The failure was in the sprint card's content assertion, not in the reviewer's insight; the symlink itself was the review's other suggestion, and it made force-include redundant.
+- Scope creep discipline held. First-pass rewrite of `emit()` moved `mkdir` and reconstructed `Signal` locally — both real §3 findings from the review, both explicitly bucketed as "In Sprint 003 or 004." Caught before commit, reverted, deferred properly.
+
+**What got in the way.**
+
+- The sprint card wrote content assertions for a pyproject.toml shape that turned out not to build. The assertion said "the force-include block includes both entries"; the actual working config has the JSON entry commented out. Sprint card assertion is stale in the audit trail. No fix required — the audit trail is the work — but a note here so a future reader knows what to trust when the sprint card and the file disagree.
+- Grep across the codebase flagged two comment lines (`# Sprint 001 tests` and `# Sprint 002 tests`) in test_signals.py that the docstring-strip missed. Same class of finding as the docstring itself — the review's §7 named docstrings but the pattern is broader. Second pass caught them.
+
+**What this says about the next kit version.**
+
+- **1. Symlinks are the cleanest cross-install pattern for packaged data.** A dedicated pattern in TECHNIQUES.md would name: put the authoring copy at project root per kit convention, symlink into `src/<pkg>/<subdir>/` for both editable and wheel install, and DO NOT add a redundant force-include for the same destination. Adjacent to §2 Data science "Metric snapshot as artifact" as a packaging-side pattern.
+- **2. "Sprint N narration in code" is a broader pattern than docstrings.** The review's §7 named docstrings; comment lines (`# Sprint N tests`) inherit the same anti-pattern. The rule should read: "no sprint numbers anywhere in shipped code — docstrings, comments, variable names, log messages." Candidate for TECHNIQUES.md §1 addition or a WORKING_AGREEMENT tone-canon extension.
+
+**Hypothesis verdicts.**
+
+- H6 (locked vocab → first-pass-clean downstream). 2-for-3. Sprint 003 failed first-pass on the build layer (duplicate destination) and required a second attempt. First-pass clean if you count "the code works and only the build config was wrong"; not first-pass clean if you count the build error. Downgrade: 2-for-2-and-a-half, still tentative.
 
 ---
 

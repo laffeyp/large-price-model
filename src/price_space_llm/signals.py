@@ -1,24 +1,23 @@
-"""Strict-validating signal emitter over the locked v0.1 vocabulary.
+"""Strict-validating signal emitter over the locked vocabulary.
 
-Wraps sdd-kit-2/lib/sdd.py's SignalVocabulary with strict-extras validation
-per WORKING_AGREEMENT.md § Vocabulary discipline. Reads signals/0.1.json
-at module import; exports a singleton `emitter` every downstream module uses.
+Wraps sdd.SignalVocabulary with strict-extras validation per
+WORKING_AGREEMENT.md § Vocabulary discipline: extra payload fields
+raise, not just missing required ones. Loads the vocabulary from a
+packaged resource so wheel and editable installs both work.
 
-Sprint 002: StrictSignalEmitter gains an optional JSONL sink that appends
-one JSON line per emit, and resets the internal clock when SESSION_INIT
-fires so `t` values read relative to session init, not to module import.
+`StrictSignalEmitter` adds an optional per-emit JSONL sink and
+resets the internal clock when SESSION_INIT fires so trace `t`
+values read relative to session init, not to module import.
 """
 from __future__ import annotations
 
 import json
 import time
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from sdd import Signal, SignalCapture, SignalEmitter, SignalVocabulary, capture
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_VOCAB_PATH = _PROJECT_ROOT / "signals" / "0.1.json"
 
 
 class StrictSignalVocabulary(SignalVocabulary):
@@ -36,9 +35,10 @@ class StrictSignalVocabulary(SignalVocabulary):
             )
 
 
-def load_vocabulary(path: Path = _VOCAB_PATH) -> StrictSignalVocabulary:
-    """Read signals/0.1.json and return a StrictSignalVocabulary bound to its tags."""
-    doc = json.loads(path.read_text())
+def load_vocabulary(name: str = "0.1.json") -> StrictSignalVocabulary:
+    """Read the packaged vocabulary and return a StrictSignalVocabulary bound to its tags."""
+    text = files("price_space_llm._vocab").joinpath(name).read_text(encoding="utf-8")
+    doc = json.loads(text)
     schema = {
         tag["name"]: {
             "category": tag["category"],
@@ -71,13 +71,12 @@ class StrictSignalEmitter(SignalEmitter):
             jsonl_sink.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(self, tag: str, **payload: Any) -> None:
-        self._vocab.validate(tag, payload)  # pre-validate; raises before any side effect
         if tag == "SESSION_INIT":
             self._session_start = time.monotonic()
         super().emit(tag, **payload)
         if self._jsonl_sink is not None:
             signal = self._buffer[-1]
-            with self._jsonl_sink.open("a") as f:
+            with self._jsonl_sink.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(signal.to_dict()) + "\n")
 
 
