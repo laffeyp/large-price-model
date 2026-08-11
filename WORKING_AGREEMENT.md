@@ -141,7 +141,7 @@ Declared per sprint. Two levels:
 - **bit-deterministic** — same seed, same code, byte-identical weights and metrics. Used for pipeline scripts, tokenizer fitting, cost-calibration regressions, feature computation.
 - **statistically deterministic** — same seed, metrics within tolerance (documented per-sprint, typically ±1% NLL, ±0.5% ECE). Used for GPU training runs where `use_deterministic_algorithms(True, warn_only=True)` cannot eliminate all nondeterminism.
 
-Every training sprint declares which level it holds itself to.
+Every training sprint declares which level it holds itself to. **Declaration site:** the sprint card's frontmatter carries `determinism_budget: bit-deterministic` or `determinism_budget: statistically-deterministic` alongside `id`, `phase`, `pass_kind`. A sprint that imports PyTorch, runs a training step, or writes a model artifact without a `determinism_budget` field halts at plan-mode review with `determinism_budget_missing`. Per `reviews/sdd-discipline-check-round-1.md` §4 — the rule fires from Sprint 007 forward.
 
 ---
 
@@ -194,6 +194,10 @@ In addition to the six base halt reasons in AGENTS.md:
 - `probe_missing` — a sprint touches feature or ingestion code for a channel not represented in `data/manifests/channel_coverage.json`. Resume: Architect runs the probe.
 - `calibration_missing` — a simulator sprint runs without both `artifacts/cost_calibration/spread_scaler.json` and `.../kappa.json` on disk. Resume: run the calibration scripts.
 - `test_look_budget_exhausted` — a sprint proposes touching the held-out set and the test-looks log already has three entries. Resume: Architect ratifies a new budget entry with an explicit `[test-look]` in the commit or halts the sprint.
+
+- `determinism_budget_missing` — a sprint that imports PyTorch, runs a training step, or writes a model artifact is missing the `determinism_budget` field in its frontmatter. Resume: add the field with the sprint's chosen level (`bit-deterministic` or `statistically-deterministic`) and re-dispatch.
+
+- `hard_rule_stretch` — a sprint card proposes >2 code files, or bundles more than one concept, or otherwise breaks a numbered hard rule. Resume: Architect ratifies the stretch by writing to `## Decisions`, or the sprint splits per halt-and-articulate. Recorded from Sprint 007 forward per `reviews/sdd-discipline-check-round-1.md` §2.
 
 ---
 

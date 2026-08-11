@@ -200,8 +200,9 @@ def _parse_type(type_str: str) -> Checker:
         v = inner[split + 1 :].strip()
         return _check_dict_of(_parse_type(k), _parse_type(v))
     # Unknown type — permissive str fallback so an unrecognised future type
-    # does not break the loader. A future vocabulary bump adding a genuine
-    # new type should also add its entry to _TYPE_CHECKERS.
+    # does not break the loader. Sprint 007 tried to tighten this to raise;
+    # the tighten surfaced a malformed type in v0.1 CAPACITY_SWEEP_COMPLETED
+    # (halt filed in BLACKBOARD 2026-08-10). Re-tighten after v0.2 lands.
     return _check_str
 
 
