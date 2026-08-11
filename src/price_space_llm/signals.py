@@ -171,7 +171,7 @@ def _check_dict_of(key_check: Checker, val_check: Checker) -> Checker:
     return check
 
 
-def _check_struct(fields: dict[str, Checker]) -> Checker:
+def check_struct(fields: dict[str, Checker]) -> Checker:
     def check(v: Any) -> None:
         if not isinstance(v, dict):
             raise ValueError(f"expected struct (dict), got {type(v).__name__}")
@@ -209,7 +209,7 @@ def _split_top_level(s: str, sep: str) -> list[str]:
     return parts
 
 
-def _parse_type(type_str: str) -> Checker:
+def parse_type(type_str: str) -> Checker:
     """Turn a vocabulary type string into a callable checker."""
     if type_str in _TYPE_CHECKERS:
         return _TYPE_CHECKERS[type_str]
@@ -219,7 +219,7 @@ def _parse_type(type_str: str) -> Checker:
     if type_str.startswith("entity_ref<") and type_str.endswith(">"):
         return _check_entity_ref
     if type_str.startswith("list<") and type_str.endswith(">"):
-        return _check_list_of(_parse_type(type_str[5:-1]))
+        return _check_list_of(parse_type(type_str[5:-1]))
     if type_str.startswith("dict<") and type_str.endswith(">"):
         inner = type_str[5:-1]
         depth = 0
@@ -236,7 +236,7 @@ def _parse_type(type_str: str) -> Checker:
             raise ValueError(f"dict<> missing comma: {type_str}")
         k = inner[:split].strip()
         v = inner[split + 1 :].strip()
-        return _check_dict_of(_parse_type(k), _parse_type(v))
+        return _check_dict_of(parse_type(k), parse_type(v))
     if type_str.startswith("struct<") and type_str.endswith(">"):
         inner = type_str[7:-1]
         fields: dict[str, Checker] = {}
@@ -245,8 +245,8 @@ def _parse_type(type_str: str) -> Checker:
             if len(name_type) != 2:
                 raise ValueError(f"struct field must be 'name:type', got {part!r}")
             name, type_s = name_type[0].strip(), name_type[1].strip()
-            fields[name] = _parse_type(type_s)
-        return _check_struct(fields)
+            fields[name] = parse_type(type_s)
+        return check_struct(fields)
     # Unknown type string — Layer-2 authoring error. Either a typo in the
     # vocabulary JSON or an unimplemented type. Fail loudly so the author
     # corrects the typo or registers the new type in _TYPE_CHECKERS.
@@ -275,7 +275,7 @@ class StrictSignalVocabulary(SignalVocabulary):  # type: ignore[misc]
                     f"so validation cannot silently degrade."
                 )
             self._field_checkers[tag] = {
-                field_name: _parse_type(type_str)
+                field_name: parse_type(type_str)
                 for field_name, type_str in entry["field_types"].items()
             }
 
@@ -372,6 +372,15 @@ __all__ = [
     "StrictSignalEmitter",
     "StrictSignalVocabulary",
     "capture",
+    "check_struct",
     "get_emitter",
     "load_vocabulary",
+    "parse_type",
 ]
+
+
+# Backwards-compat aliases for the previously private forms. Underscore
+# imports remain valid until a future sprint's KIT_DIARY entry confirms
+# no external caller uses them.
+_parse_type = parse_type
+_check_struct = check_struct

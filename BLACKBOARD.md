@@ -68,6 +68,8 @@
 
 *Agent appends one entry per sprint close. Append-only.*
 
+- **Sprint 011 (2026-08-10)** — public parser API + review-driven doc updates (per `reviews/full-review-round-1.md`). Renamed `_parse_type` → `parse_type` and `_check_struct` → `check_struct`; both added to `__all__`; underscore aliases preserved for backwards compat. Every underscore-prefixed import in tests replaced with the public form. WORKING_AGREEMENT canonical home registry gains rows for `signals/0.1.json` (locked v0.1, on disk for audit), `signals/0.2.json` (loader default from Sprint 009), and `src/price_space_llm/signals.py` (package-root placement with rationale). WORKING_AGREEMENT § External SDK bridge mappings gains the dep-pin rule: first sprint that imports each SDK adds the pin to `pyproject.toml` in the same commit as the bridge mapping. BLACKBOARD § Deferred gains the BBO source gap entry. Dual contract: signal (test-time only) + artifact (25 passed; four tools green; every content assertion holds).
+
 - **Sprint 010 (2026-08-10)** — Sprint 007 redux against v0.2. `_parse_type` now raises on unknown type strings; `StrictSignalVocabulary.__init__` raises if any tag's schema entry lacks `field_types`. v0.2 loads clean because `struct` is a first-class type kind. Two new tests. 25 passed in 0.08s; all four tools green. Sprint 007 halt (`vocabulary_change_required`) resolved via the Sprint 008 + Sprint 009 + Sprint 010 chain.
 
 - **Sprint 009 (2026-08-10)** — vocabulary v0.2 lock. `signals/0.2.json` authored (55 tags, 14 categories — byte-identical to v0.1 except: version metadata bumped, `CAPACITY_SWEEP_COMPLETED.points` type corrected to `list<struct<size_usd:float, sharpe:float, sharpe_se:float>>`, `grammar_growth.project_overrides` records the struct type-kind addition). `signals/0.2-rationale.md` written as delta doc. `signals/proposals.json` reopened; P-016 filed with `kind: INVARIANT_PROPOSED` (closest canonical fit for a type-string correction) and stamped `accepted 2026-08-10`. Loader default retargeted from `0.1.json` to `0.2.json`. `src/price_space_llm/_vocab/0.2.json` symlink added alongside the existing `0.1.json` symlink. 23 tests continue to pass; wheel builds clean. v0.1 remains on disk per hard rule 12.
@@ -95,6 +97,8 @@
 *Anyone may append. Re-visit conditions noted.*
 
 - **2026-08-09 (Agent)** — Reading the archived earlier product/tech-arch versions in full is deferred. Trigger to revisit: the Architect names a specific point of contention where the v4-vs-v2/v3 diff is load-bearing.
+
+- **2026-08-10 (Agent, from `reviews/full-review-round-1.md` §4.7)** — BBO source unspecified. `product-spec-v4.md § Dependencies § Data § BBO calibration` requires "any free source producing target-instrument BBO snapshots on the 2015–2022 window." Tech-arch §11.1 uses BBO as the input to `scripts/calibrate_spread.py`. The MCP tool list does not include BBO; Polygon.io fallback is for 15-min bars, not BBO. Revisit trigger: the sprint that authors `scripts/calibrate_spread.py`. Expected resolution shape: a `bridge_mapping_required` halt naming a candidate source (Databento, IEX Cloud, or an academic archive) with a specific tool + auth requirement + cost.
 
 - **2026-08-09 → 2026-08-10 (Agent, resolved 2026-08-10)** — Git init deferral closed. Architect ratified init immediately after Sprint 0 lock; repo initialised on `main` at project root; private GitHub remote created at https://github.com/laffeyp/PriceSpaceLLM (name convention `PriceSpaceLLM`, PascalCase per Architect); pushed. Initial commit 8feff8c carries Sprint 0's full artifact set. Pre-commit hooks (check_test_look.sh, SPY grep, one-source-of-truth channel test) authored in the sprint that first needs each — Sprint 3 or 4 candidates.
 
@@ -143,6 +147,14 @@
 ## Sprint tail
 
 *Agent maintains. Last 10 sprint closes; older entries roll into `## Built` as compressed paragraphs.*
+
+### Sprint 011 (2026-08-10, closed)
+
+- **Scope:** rename `_parse_type` and `_check_struct` to their public forms; WORKING_AGREEMENT + BLACKBOARD documentation updates from the full review.
+- **Dual contract:** signal (test-time only) + artifact (25 passed; all four tools green).
+- **Rubber Duck Pass:** no observations. The rename + doc updates landed clean.
+- **Files:** `src/price_space_llm/signals.py`, `tests/test_signals.py`, `WORKING_AGREEMENT.md`, `BLACKBOARD.md`.
+- **Closed:** clean.
 
 ### Sprint 010 (2026-08-10, closed)
 

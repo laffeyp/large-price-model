@@ -53,7 +53,9 @@ Per AGENTS.md hard rule 7. Seeded from `specs/technical-architecture-v4.md` §15
 | Training loop | `src/training/loop.py` | All-position CE; magnitude weight via `alpha`; checkpoint by validation NLL. |
 | Simulator | `src/simulation/walker.py` + `src/simulation/cost.py` + `src/simulation/policy.py` | Bar-by-bar; fills at next bar's open. |
 | Evaluation metrics | `src/evaluation/metrics.py` | NLL, ECE, Brier, RPS, dir-acc, regime split. |
-| Vocabulary (locked) | `signals/0.1.json` | Loaded via `SignalVocabulary(json.loads(...))`. |
+| Vocabulary (locked v0.1) | `signals/0.1.json` | On disk for audit. Loader can request via `load_vocabulary(name="0.1.json")`. |
+| Vocabulary (locked v0.2) | `signals/0.2.json` | Loader default from Sprint 009 forward. Delta from v0.1 in `signals/0.2-rationale.md`. |
+| Signal emitter + vocabulary loader | `src/price_space_llm/signals.py` | Package-root placement, deliberate deviation from tech-arch §3's `src/utils/` inference. Observability is not a pipeline concern the spec dictates. Graduates to a sub-package (`observability/`) when the layer grows past one module. Per `reviews/full-review-round-1.md` §1.1. |
 | Signal emitter | Vendored from `sdd-kit-2/lib/sdd.py` | Or a project-local extension if we need a JSONL sink. |
 
 Type additions land here as they stabilize; renames land here as deprecation rows (never removals).
@@ -92,6 +94,8 @@ Per AGENTS.md hard rule 10 (halt with `bridge_mapping_required` if a sprint impo
 - Project `price-space-llm`. Logs config, git SHA, data hash. To fill: the exact `wandb.init(...)` shape and the `wandb.log()` cadence once the first training run lands.
 
 Every bridge mapping above is a stub. First sprint that imports the SDK halts with `bridge_mapping_required` if the actual surface is not documented here at that time. That halt is a feature — it forces us to read the SDK before writing against it, per soundfield's round 13/20-26 origin (Addendum C, external-SDK reverse-engineer-first).
+
+**Dep-pin rule (per `reviews/full-review-round-1.md` §4.1).** The first sprint that imports each SDK adds the pin to `pyproject.toml § project.dependencies` in the same commit as the bridge mapping. Lower bounds match the tech-arch's declared minimum; upper bounds are the sprint author's call (typically none or a next-major cap). A sprint that adds an import without the pin, or a pin without the import, fails its plan-mode checklist.
 
 ---
 

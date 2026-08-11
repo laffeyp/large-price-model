@@ -111,9 +111,9 @@ def test_bool_masquerading_as_int_raises():
 
 
 def test_uuid_parser_rejects_malformed():
-    from price_space_llm.signals import _parse_type
+    from price_space_llm.signals import parse_type
 
-    uuid_check = _parse_type("uuid")
+    uuid_check = parse_type("uuid")
     uuid_check("550e8400-e29b-41d4-a716-446655440000")  # valid, no raise
     with pytest.raises(ValueError, match="uuid"):
         uuid_check("not-a-uuid")
@@ -201,40 +201,40 @@ def test_session_init_resets_the_clock(tmp_path: Path):
 
 
 def test_struct_parser_accepts_valid_record():
-    from price_space_llm.signals import _parse_type
+    from price_space_llm.signals import parse_type
 
-    check = _parse_type("struct<size_usd:float, sharpe:float, sharpe_se:float>")
+    check = parse_type("struct<size_usd:float, sharpe:float, sharpe_se:float>")
     check({"size_usd": 1_000_000.0, "sharpe": 1.2, "sharpe_se": 0.3})
 
 
 def test_struct_parser_rejects_missing_field():
-    from price_space_llm.signals import _parse_type
+    from price_space_llm.signals import parse_type
 
-    check = _parse_type("struct<size_usd:float, sharpe:float>")
+    check = parse_type("struct<size_usd:float, sharpe:float>")
     with pytest.raises(ValueError, match="missing fields"):
         check({"size_usd": 1_000_000.0})
 
 
 def test_struct_parser_rejects_extra_field():
-    from price_space_llm.signals import _parse_type
+    from price_space_llm.signals import parse_type
 
-    check = _parse_type("struct<size_usd:float>")
+    check = parse_type("struct<size_usd:float>")
     with pytest.raises(ValueError, match="unknown fields"):
         check({"size_usd": 1_000_000.0, "unexpected": 42})
 
 
 def test_struct_parser_rejects_wrong_type_on_field():
-    from price_space_llm.signals import _parse_type
+    from price_space_llm.signals import parse_type
 
-    check = _parse_type("struct<size_usd:float, sharpe:float>")
+    check = parse_type("struct<size_usd:float, sharpe:float>")
     with pytest.raises(ValueError, match="sharpe"):
         check({"size_usd": 1_000_000.0, "sharpe": "not a number"})
 
 
 def test_struct_parser_handles_nested_types():
-    from price_space_llm.signals import _parse_type
+    from price_space_llm.signals import parse_type
 
-    check = _parse_type("list<struct<size_usd:float, sharpe:float, sharpe_se:float>>")
+    check = parse_type("list<struct<size_usd:float, sharpe:float, sharpe_se:float>>")
     check(
         [
             {"size_usd": 100_000.0, "sharpe": 0.5, "sharpe_se": 0.2},
@@ -254,10 +254,10 @@ def test_struct_parser_handles_nested_types():
 
 
 def test_parse_type_raises_on_unknown_type_string():
-    from price_space_llm.signals import _parse_type
+    from price_space_llm.signals import parse_type
 
     with pytest.raises(ValueError, match="Unknown type string"):
-        _parse_type("nonexistent_type")
+        parse_type("nonexistent_type")
 
 
 def test_vocabulary_raises_on_missing_field_types():
