@@ -80,28 +80,65 @@ The Phase 0 probe (`src/price_space_llm/ingestion/probe.py`) takes an injected `
 
 The vocabulary's `source` field is currently `enum<mcp_av|polygon>`. Adding a third provider means a v0.3 evolution to broaden the enum. Trigger recorded in `BLACKBOARD.md § Surfaced for review` 2026-08-10 (source-abstraction question).
 
-### Alpha-Vantage MCP (primary v1 provider — `source: "mcp_av"`)
+### Alpha-Vantage — data provider (`source: "mcp_av"` in v0.2 vocabulary)
 
-- **Access.** MCP tools in the `mcp__claude_ai_Alpha_Vantage_MCP_Server__*` namespace. The agent invokes via ToolSearch(`"select:<TOOL>"`) to fetch each tool's schema; the fetcher wrapper (Sprint 018) translates FetchResult calls into those tool invocations.
-- **v1 tool list (documented best-effort at Sprint 016; Sprint 018 verifies against the actual MCP surface and halts with `bridge_mapping_required` on divergence):**
+**Sprint 018 discovery.** The `mcp__claude_ai_Alpha_Vantage_MCP_Server__*` tools are agent-only — a shell-invoked Python script has no access. Sprint 018 halted with `bridge_mapping_required` on the transport question; Sprint 019 (per Architect Decision) chooses HTTP + API key, `mcp` Python SDK + local server, or agent-mediated dump-and-read. The `source: "mcp_av"` label in the vocabulary tags data provenance (Alpha-Vantage), not transport (which may or may not be MCP).
 
-| Channel | Symbol(s) | Tool | Expected arguments | Notes |
+**Agent-side MCP tool surface (observed 2026-08-11 via ToolSearch + one live call).** These signatures are what my MCP client sees. A Python-runtime fetcher shaped as (a) HTTP or (c) agent-mediated dump reads the same underlying Alpha-Vantage service through its own transport.
+
+| Channel | Symbol(s) | Tool | Required args | Optional args |
 |---|---|---|---|---|
-| target, market_context | SPY, QQQ, IWM, VIX, TLT, DXY, GLD, USO | `TIME_SERIES_INTRADAY` | `symbol, interval, month, outputsize` | Requested `interval=15min`; downsampled from 5min if 15min unsupported per tech-arch §4.2. |
-| target, market_context (fallback) | any | `TIME_SERIES_DAILY_ADJUSTED` | `symbol, outputsize` | Coarse fallback for coverage sanity checks. |
-| macro | CPI | `CPI` | `interval` | monthly or annual. |
-| macro | FEDFUNDS | `FEDERAL_FUNDS_RATE` | `interval` | daily / weekly / monthly. |
-| macro | DGS10 | `TREASURY_YIELD` | `interval, maturity=10year` | |
-| macro | UNRATE | `UNEMPLOYMENT` | — | monthly. |
-| macro | NFP | `NONFARM_PAYROLL` | — | monthly. |
-| options | put/call ratio | `HISTORICAL_PUT_CALL_RATIO` | `symbol, date_range` | |
-| options | volume/OI | `HISTORICAL_VOLUME_OPEN_INTEREST_RATIO` | `symbol, date_range` | |
-| event | earnings | `EARNINGS_CALENDAR` | `symbol, horizon` | |
+| target, market_context | SPY, QQQ, IWM, VIX, TLT, DXY, GLD, USO | `TIME_SERIES_INTRADAY` | `symbol`, `interval` | `adjusted`, `datatype`, `entitlement`, `extended_hours`, `month` (YYYY-MM), `outputsize` (compact/full), `return_full_data` |
+| target, market_context (fallback) | any | `TIME_SERIES_DAILY_ADJUSTED` | `symbol` | `outputsize`, `datatype`, `return_full_data` |
+| macro | CPI | `CPI` | — | `datatype`, `interval` (monthly/semiannual), `return_full_data` |
+| macro | FEDFUNDS | `FEDERAL_FUNDS_RATE` | — | `datatype`, `interval` (daily/weekly/monthly), `return_full_data` |
+| macro | DGS10 | `TREASURY_YIELD` | — | `datatype`, `interval`, `maturity`, `return_full_data` |
+| macro | UNRATE | `UNEMPLOYMENT` | — | `datatype`, `return_full_data` |
+| macro | NFP | `NONFARM_PAYROLL` | — | `datatype`, `return_full_data` |
+| options | put/call ratio | `HISTORICAL_PUT_CALL_RATIO` | (verify at first use) | (verify) |
+| options | volume/OI | `HISTORICAL_VOLUME_OPEN_INTEREST_RATIO` | (verify at first use) | (verify) |
+| event | earnings | `EARNINGS_CALENDAR` | (verify at first use) | (verify) |
 
-- **Return shape (expected).** Per-tool returns a JSON object with a time-series keyed by timestamp. The fetcher normalises to `FetchResult` (actual_frequency, earliest_timestamp, latest_timestamp, missing_fraction, timezone, timestamp_semantics, revision_behavior) at the probe stage; the ingestion sprint (Sprint N > 018) normalises to `RawObservation` rows with the four `known_at`-schema columns.
-- **Rate limit.** 75 req/min per `IngestionClient` token bucket (tech-arch §4.2). Vocabulary invariant `INGESTION_CALL_ISSUED` cadence check enforces.
-- **Retry.** Retry-with-backoff on 429/5xx per tech-arch §4.2; fires `INGESTION_CALL_RETRIED` at each retry.
-- **Sprint 018 halt condition.** If the actual `mcp__claude_ai_Alpha_Vantage_MCP_Server__*` tool signatures diverge from the table above, halt with `bridge_mapping_required` and update this table before proceeding.
+**Universal parameter.** Every tool carries `return_full_data: bool`. Purpose undocumented in the schema; treat as an MCP-server flag that toggles whether the full JSON response returns or only a summary. Fetcher wrappers set explicitly rather than rely on default.
+
+**Response shape (from a real 2026-08-11 `TIME_SERIES_INTRADAY(SPY, 15min, compact, json)` call).**
+
+```json
+{
+  "Meta Data": {
+    "1. Information": "Intraday (15min) open, high, low, close prices and volume",
+    "2. Symbol": "SPY",
+    "3. Last Refreshed": "2026-08-10 20:00:00",
+    "4. Interval": "15min",
+    "5. Output Size": "Compact",
+    "6. Time Zone": "US/Eastern"
+  },
+  "Time Series (15min)": {
+    "2026-08-10 20:00:00": {
+      "1. open": "773.0300", "2. high": "773.0300",
+      "3. low":  "773.0300", "4. close": "773.0300",
+      "5. volume": "683541"
+    },
+    ...
+  }
+}
+```
+
+Normalisation the fetcher owns:
+- Strip ordinal prefixes from OHLCV keys (`"1. open"` → `open`).
+- Coerce string numbers to `float` (OHLC) and `int` (volume).
+- Convert `US/Eastern` timestamps to UTC (`bar_close` semantics; tech-arch §4.3).
+- Stamp `known_at` from a channel-manifest vendor-latency budget — vendor gives no `known_at`; project side owns the derivation.
+- Compact returns 100 latest points; historical months require `outputsize="full"` + `month="YYYY-MM"`.
+
+**Transport choice (Sprint 019).** Three paths per BLACKBOARD § Surfaced for review 2026-08-11:
+- **(a) HTTP + API key.** `httpx` dep + `ALPHAVANTAGE_API_KEY` env var. Free tier 5 req/min / 500/day — enough for Phase 0 probe; ingestion sprints buy paid tier or fall back to Polygon.
+- **(b) `mcp` Python SDK + local Alpha-Vantage MCP server.** Client library exists; server binary availability unverified.
+- **(c) Agent-mediated dump-and-read.** Agent (Claude) invokes MCP tools, dumps JSON to `data/raw/mcp/{tool}_{params_hash}.json`; script reads. Fine for Phase 0 (one-time, small); doesn't scale.
+
+**Rate limit + retry.** Tech-arch §4.2 says 75 req/min. Alpha-Vantage's free HTTP tier is actually 5 req/min. `IngestionClient` token bucket should read from a channel-manifest setting, not a hardcoded 75. Sprint 019 fetcher wraps whichever transport with the token bucket. Vocabulary invariant `INGESTION_CALL_ISSUED` cadence check enforces at emit time.
+
+**Fetcher contract (unchanged from Sprint 016).** `Callable[[channel, symbol, source, sample_date], FetchResult]`. Sprint 019's real fetcher implements this signature over the chosen transport; the probe module and its tests remain provider-agnostic.
 
 ### Polygon.io (fallback v1 provider — `source: "polygon"`)
 

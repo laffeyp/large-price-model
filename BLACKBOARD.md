@@ -110,6 +110,18 @@
 
 - **2026-08-09 (Agent)** — Reading the archived earlier product/tech-arch versions in full is deferred. Trigger to revisit: the Architect names a specific point of contention where the v4-vs-v2/v3 diff is load-bearing.
 
+- **2026-08-11 Claude Code (Opus 4.7)** — HALT: `bridge_mapping_required` (Sprint 018). Discovery run against the actual `mcp__claude_ai_Alpha_Vantage_MCP_Server__*` MCP tools surfaced two divergences from `WORKING_AGREEMENT § Alpha-Vantage MCP` as documented in Sprint 016.
+
+  **(1) Signature divergence.** Every tool carries a `return_full_data: bool` parameter I didn't document. `TIME_SERIES_INTRADAY` accepts five params beyond `(symbol, interval, month, outputsize)`: `adjusted`, `datatype`, `entitlement`, `extended_hours`, `return_full_data`. Response shape (from real `TIME_SERIES_INTRADAY(SPY, 15min, compact, json)` call): timestamps default US/Eastern not UTC; values are strings not numbers; OHLCV keys carry ordinal prefixes (`"1. open"`); compact returns 100 latest points, historical months need `outputsize="full"` + `month="YYYY-MM"`; vendor gives no `known_at`. WORKING_AGREEMENT updated with the observed shape.
+
+  **(2) Transport gap.** The MCP tools live in my agent MCP namespace. A shell-invoked `python scripts/probe_channels.py` has no access to them at runtime. Pipeline needs one of three transports:
+
+  - **(a) HTTP + API key.** `httpx` dep + `ALPHAVANTAGE_API_KEY` env var. Free tier 5 req/min / 500/day. Standard shape. **My recommendation** — this is the honest pipeline path and the label `source: "mcp_av"` remains valid as a data-provenance tag (Alpha-Vantage), independent of transport (HTTP).
+  - **(b) `mcp` Python SDK + local Alpha-Vantage MCP server.** Client library exists; server binary availability unverified. Heavier; adds one process to manage per run.
+  - **(c) Agent-mediated dump-and-read.** Agent (Claude) invokes MCP tools, dumps JSON to `data/raw/mcp/`; script reads. Fine for Phase 0 (one-time, small number of calls); doesn't scale to ingestion (thousands of calls).
+
+  Sprint 018 halted. No production code authored. WORKING_AGREEMENT bridge mapping updated with observed reality. Resume: Architect writes to `## Decisions` picking (a), (b), or (c). Sprint 019 authors the fetcher against the chosen transport.
+
 - **2026-08-10 Claude Code (Opus 4.7)** — SURFACED: `source` type at Layer 2 is `enum<mcp_av|polygon>` — closed to two named providers. Every new provider (Databento for BBO, IEX Cloud, Binance for crypto, etc.) requires a v0.X vocabulary evolution to broaden the enum. Two paths, both defensible:
   - **(a) Keep enum closed.** Each provider is a discrete decision. A Reviewer greps the vocabulary and gets a definitive list of known sources. Overhead: one v0.X bump per provider. Small if the list stays under ten; ceremony if the list grows quickly. Matches the vocabulary-is-the-contract commitment.
   - **(b) Broaden to `source: str`.** Provider identifier becomes opaque. New providers just work. Loses the emit-time enum check that catches typos (`polygonio` vs `polygon`). Provider whitelist would live at Layer 6 (operator side) via a registered-fetcher pattern. Matches provider-agnostic design.
