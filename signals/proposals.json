@@ -2,7 +2,7 @@
   "_note": "Canonical proposals only per grammar/PRINCIPLES.md \u00a7 'The supervised-grammar-evolution proposal taxonomy'. Round 2 invented seven non-canonical proposal types; round 3 recasts. The eight canonical types are: NEW_TAG_PROPOSED, PAYLOAD_FIELD_PROPOSED, SEQUENCE_RULE_PROPOSED, INVARIANT_PROPOSED, TAG_SPLIT_PROPOSED, TAG_MERGE_PROPOSED, TAG_DEPRECATION_PROPOSED, ENTITY_MERGE_PROPOSED. Extension of the taxonomy is a Layer-10 grammar-growth change stamped at the kit-methodology level, not a move the Worker makes by writing new kinds inline. Pre-lock entity additions and rejections do not go through proposals.json at all \u2014 Step-1 Architect ratifies inline against signals/0.1.json \u00a7 entity_implied_but_unnamed.flags[] and against direct removals from entities[].",
   "version_of_target_vocabulary": "0.1",
   "opened_at": "2026-08-09",
-  "closed_at": "2026-08-09 (round 4)",
+  "closed_at": null,
   "proposals": [
     {
       "id": "P-001",
@@ -48,6 +48,24 @@
       "outcome": "accepted",
       "outcome_date": "2026-08-09",
       "stamped_by": "Architect (Peter Laffey), inline via BLACKBOARD 2026-08-09"
+    },
+    {
+      "id": "P-016",
+      "kind": "INVARIANT_PROPOSED",
+      "layer": 2,
+      "target_vocabulary_version": "0.1 -> 0.2",
+      "candidate": "CAPACITY_SWEEP_COMPLETED.points type: list<dict<size_usd:float, sharpe:float, sharpe_se:float>> -> list<struct<size_usd:float, sharpe:float, sharpe_se:float>>",
+      "rationale": "The v0.1 declaration is not valid dict<K,V> syntax per Layer 2 type vocabulary; it declares three named typed fields where dict<K,V> allows one key type and one value type. The corrected declaration uses the struct composite (Layer-2 type-kind extension landed in Sprint 008 and recorded in grammar_growth.project_overrides). Semantics preserved: list of records with three named typed fields.",
+      "source_citations": [
+        "reviews/sdd-discipline-check-round-1.md \u00a73",
+        "sprints/sprint-007-tighten-permissive-fallbacks.md (halted)",
+        "sprints/sprint-008-struct-type-kind.md",
+        "signals/0.2-rationale.md"
+      ],
+      "surfaced_by": "Sprint 007 execution halted on _parse_type failure to match the malformed type string",
+      "outcome": "accepted",
+      "outcome_date": "2026-08-10",
+      "stamped_by": "Architect (Peter Laffey), 'go' after two-paths analysis 2026-08-10"
     }
   ],
   "_recast_log": {

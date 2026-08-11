@@ -171,6 +171,44 @@ def _check_dict_of(key_check: Checker, val_check: Checker) -> Checker:
     return check
 
 
+def _check_struct(fields: dict[str, Checker]) -> Checker:
+    def check(v: Any) -> None:
+        if not isinstance(v, dict):
+            raise ValueError(f"expected struct (dict), got {type(v).__name__}")
+        allowed = set(fields.keys())
+        provided = set(v.keys())
+        missing = allowed - provided
+        if missing:
+            raise ValueError(f"struct missing fields: {sorted(missing)}")
+        extras = provided - allowed
+        if extras:
+            raise ValueError(f"struct has unknown fields: {sorted(extras)}")
+        for name, val in v.items():
+            try:
+                fields[name](val)
+            except ValueError as e:
+                raise ValueError(f"struct field {name!r}: {e}") from e
+
+    return check
+
+
+def _split_top_level(s: str, sep: str) -> list[str]:
+    """Split s on `sep` at depth 0 (respecting angle-bracket nesting)."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, c in enumerate(s):
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+        elif c == sep and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+    parts.append(s[start:])
+    return parts
+
+
 def _parse_type(type_str: str) -> Checker:
     """Turn a vocabulary type string into a callable checker."""
     if type_str in _TYPE_CHECKERS:
@@ -199,11 +237,25 @@ def _parse_type(type_str: str) -> Checker:
         k = inner[:split].strip()
         v = inner[split + 1 :].strip()
         return _check_dict_of(_parse_type(k), _parse_type(v))
-    # Unknown type — permissive str fallback so an unrecognised future type
-    # does not break the loader. Sprint 007 tried to tighten this to raise;
-    # the tighten surfaced a malformed type in v0.1 CAPACITY_SWEEP_COMPLETED
-    # (halt filed in BLACKBOARD 2026-08-10). Re-tighten after v0.2 lands.
-    return _check_str
+    if type_str.startswith("struct<") and type_str.endswith(">"):
+        inner = type_str[7:-1]
+        fields: dict[str, Checker] = {}
+        for part in _split_top_level(inner, ","):
+            name_type = _split_top_level(part.strip(), ":")
+            if len(name_type) != 2:
+                raise ValueError(f"struct field must be 'name:type', got {part!r}")
+            name, type_s = name_type[0].strip(), name_type[1].strip()
+            fields[name] = _parse_type(type_s)
+        return _check_struct(fields)
+    # Unknown type string — Layer-2 authoring error. Either a typo in the
+    # vocabulary JSON or an unimplemented type. Fail loudly so the author
+    # corrects the typo or registers the new type in _TYPE_CHECKERS.
+    raise ValueError(
+        f"Unknown type string {type_str!r}. "
+        f"Known primitives: {sorted(_TYPE_CHECKERS)}. "
+        f"Known composites: enum<...>, entity_ref<...>, list<...>, "
+        f"dict<...,...>, struct<name:type, ...>."
+    )
 
 
 # ── vocabulary + emitter ──────────────────────────────────────────────────────
@@ -216,9 +268,15 @@ class StrictSignalVocabulary(SignalVocabulary):  # type: ignore[misc]
         super().__init__(schema)
         self._field_checkers: dict[str, dict[str, Checker]] = {}
         for tag, entry in schema.items():
+            if "field_types" not in entry:
+                raise ValueError(
+                    f"Tag {tag!r} schema entry is missing 'field_types'. "
+                    f"Every entry must declare field_types (may be empty dict) "
+                    f"so validation cannot silently degrade."
+                )
             self._field_checkers[tag] = {
                 field_name: _parse_type(type_str)
-                for field_name, type_str in entry.get("field_types", {}).items()
+                for field_name, type_str in entry["field_types"].items()
             }
 
     def validate(self, tag: str, payload: dict[str, Any]) -> None:
@@ -242,7 +300,7 @@ class StrictSignalVocabulary(SignalVocabulary):  # type: ignore[misc]
                 raise ValueError(f"Signal '{tag}' field '{field_name}': {e}") from e
 
 
-def load_vocabulary(name: str = "0.1.json") -> StrictSignalVocabulary:
+def load_vocabulary(name: str = "0.2.json") -> StrictSignalVocabulary:
     """Read the packaged vocabulary and return a StrictSignalVocabulary bound to its tags."""
     text = files("price_space_llm._vocab").joinpath(name).read_text(encoding="utf-8")
     doc = json.loads(text)

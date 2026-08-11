@@ -57,7 +57,7 @@ VALID_CHECKPOINT_WRITTEN_PAYLOAD = {
 def test_locked_vocabulary_loads_all_tags():
     vocab = load_vocabulary()
     raw = json.loads(
-        files("price_space_llm._vocab").joinpath("0.1.json").read_text(encoding="utf-8")
+        files("price_space_llm._vocab").joinpath("0.2.json").read_text(encoding="utf-8")
     )
     assert len(vocab.tags()) == len(raw["tags"])
 
@@ -195,6 +195,87 @@ def test_session_init_resets_the_clock(tmp_path: Path):
     # Threshold 0.04 comfortably distinguishes a reset (t < 1ms typically)
     # from no-reset (t >= 0.05 from the pre-emit sleep). 40x noise margin.
     assert line["t"] < 0.04
+
+
+# Struct type kind -------------------------------------------------------------
+
+
+def test_struct_parser_accepts_valid_record():
+    from price_space_llm.signals import _parse_type
+
+    check = _parse_type("struct<size_usd:float, sharpe:float, sharpe_se:float>")
+    check({"size_usd": 1_000_000.0, "sharpe": 1.2, "sharpe_se": 0.3})
+
+
+def test_struct_parser_rejects_missing_field():
+    from price_space_llm.signals import _parse_type
+
+    check = _parse_type("struct<size_usd:float, sharpe:float>")
+    with pytest.raises(ValueError, match="missing fields"):
+        check({"size_usd": 1_000_000.0})
+
+
+def test_struct_parser_rejects_extra_field():
+    from price_space_llm.signals import _parse_type
+
+    check = _parse_type("struct<size_usd:float>")
+    with pytest.raises(ValueError, match="unknown fields"):
+        check({"size_usd": 1_000_000.0, "unexpected": 42})
+
+
+def test_struct_parser_rejects_wrong_type_on_field():
+    from price_space_llm.signals import _parse_type
+
+    check = _parse_type("struct<size_usd:float, sharpe:float>")
+    with pytest.raises(ValueError, match="sharpe"):
+        check({"size_usd": 1_000_000.0, "sharpe": "not a number"})
+
+
+def test_struct_parser_handles_nested_types():
+    from price_space_llm.signals import _parse_type
+
+    check = _parse_type("list<struct<size_usd:float, sharpe:float, sharpe_se:float>>")
+    check(
+        [
+            {"size_usd": 100_000.0, "sharpe": 0.5, "sharpe_se": 0.2},
+            {"size_usd": 500_000.0, "sharpe": 0.8, "sharpe_se": 0.25},
+        ]
+    )
+    with pytest.raises(ValueError, match="list index 1"):
+        check(
+            [
+                {"size_usd": 100_000.0, "sharpe": 0.5, "sharpe_se": 0.2},
+                {"size_usd": 500_000.0, "sharpe": "bad", "sharpe_se": 0.25},
+            ]
+        )
+
+
+# Parser and vocabulary strictness ---------------------------------------------
+
+
+def test_parse_type_raises_on_unknown_type_string():
+    from price_space_llm.signals import _parse_type
+
+    with pytest.raises(ValueError, match="Unknown type string"):
+        _parse_type("nonexistent_type")
+
+
+def test_vocabulary_raises_on_missing_field_types():
+    from price_space_llm.signals import StrictSignalVocabulary
+
+    bad_schema = {
+        "SOME_TAG": {
+            "category": "session",
+            "payload": ["run_id"],
+            "optional_payload": [],
+            # field_types missing on purpose — must raise
+        }
+    }
+    with pytest.raises(ValueError, match="missing 'field_types'"):
+        StrictSignalVocabulary(bad_schema)
+
+
+# Sink tests --------------------------------------------------------------------
 
 
 def test_sink_parent_created_on_first_emit_not_construction(tmp_path: Path):
