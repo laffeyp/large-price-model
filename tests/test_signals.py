@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import time
 from importlib.resources import files
 from pathlib import Path
 
@@ -186,15 +185,19 @@ def test_session_init_and_complete_bookend_the_trace(tmp_path: Path):
     assert lines[-1]["tag"] == "SESSION_COMPLETE"
 
 
-def test_session_init_resets_the_clock(tmp_path: Path):
+def test_session_init_resets_the_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Controlled clock. Every read after the reset returns 200.0005, so
+    # t = 200.0005 - 200.0 = 0.0005 for both the parent's Signal and the
+    # sink's reconstruction. Without a reset, t would read 100.0005+.
+    schedule = [100.0, 200.0] + [200.0005] * 32
+    times = iter(schedule)
+    monkeypatch.setattr("price_space_llm.signals.time.monotonic", lambda: next(times))
+
     sink = tmp_path / "signals.jsonl"
     e = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink)
-    time.sleep(0.05)
     e.emit("SESSION_INIT", **VALID_SESSION_INIT_PAYLOAD)
     line = json.loads(sink.read_text().strip())
-    # Threshold 0.04 comfortably distinguishes a reset (t < 1ms typically)
-    # from no-reset (t >= 0.05 from the pre-emit sleep). 40x noise margin.
-    assert line["t"] < 0.04
+    assert line["t"] < 0.001  # deterministic: 0.0005 under the controlled clock
 
 
 # Struct type kind -------------------------------------------------------------
@@ -273,6 +276,77 @@ def test_vocabulary_raises_on_missing_field_types():
     }
     with pytest.raises(ValueError, match="missing 'field_types'"):
         StrictSignalVocabulary(bad_schema)
+
+
+# Process-session tests --------------------------------------------------------
+
+
+def _reset_emitter_cache():
+    from price_space_llm.signals import get_emitter
+
+    get_emitter.cache_clear()
+
+
+def _process_kwargs():
+    return {
+        "run_kind": "eval",
+        "config_hash": _REAL_HASH,
+        "git_sha": _REAL_GIT_SHA,
+        "data_hash": _REAL_DATA_HASH,
+        "seed": 1337,
+    }
+
+
+def test_process_session_emits_init_and_complete():
+    from price_space_llm.signals import get_emitter, process_session
+
+    _reset_emitter_cache()
+    e = get_emitter()
+    before = len(e.snapshot())
+    with process_session(**_process_kwargs()) as run_id:
+        assert isinstance(run_id, str)
+    after = e.snapshot()[before:]
+    assert after[0].tag == "SESSION_INIT"
+    assert after[-1].tag == "SESSION_COMPLETE"
+    assert after[-1].payload["exit_code"] == 0
+
+
+def test_process_session_counts_signals_correctly():
+    from price_space_llm.signals import get_emitter, process_session
+
+    _reset_emitter_cache()
+    e = get_emitter()
+    with process_session(**_process_kwargs()) as _:
+        e.emit("CHECKPOINT_WRITTEN", **VALID_CHECKPOINT_WRITTEN_PAYLOAD)
+        e.emit("CHECKPOINT_WRITTEN", **{**VALID_CHECKPOINT_WRITTEN_PAYLOAD, "step": 200})
+    last = e.snapshot()[-1]
+    # SESSION_INIT + 2 CHECKPOINT_WRITTEN + SESSION_COMPLETE = 4
+    assert last.tag == "SESSION_COMPLETE"
+    assert last.payload["n_signals_emitted"] == 4
+
+
+def test_process_session_captures_exception_exit_code():
+    from price_space_llm.signals import get_emitter, process_session
+
+    _reset_emitter_cache()
+    e = get_emitter()
+    with pytest.raises(RuntimeError, match="boom"), process_session(**_process_kwargs()):
+        raise RuntimeError("boom")
+    last = e.snapshot()[-1]
+    assert last.tag == "SESSION_COMPLETE"
+    assert last.payload["exit_code"] == 1
+
+
+def test_process_session_captures_systemexit_code():
+    from price_space_llm.signals import get_emitter, process_session
+
+    _reset_emitter_cache()
+    e = get_emitter()
+    with pytest.raises(SystemExit), process_session(**_process_kwargs()):
+        raise SystemExit(2)
+    last = e.snapshot()[-1]
+    assert last.tag == "SESSION_COMPLETE"
+    assert last.payload["exit_code"] == 2
 
 
 # Sink tests --------------------------------------------------------------------

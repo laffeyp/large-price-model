@@ -26,7 +26,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from functools import lru_cache
 from importlib.resources import files
@@ -222,20 +223,11 @@ def parse_type(type_str: str) -> Checker:
         return _check_list_of(parse_type(type_str[5:-1]))
     if type_str.startswith("dict<") and type_str.endswith(">"):
         inner = type_str[5:-1]
-        depth = 0
-        split = None
-        for i, c in enumerate(inner):
-            if c == "<":
-                depth += 1
-            elif c == ">":
-                depth -= 1
-            elif c == "," and depth == 0:
-                split = i
-                break
-        if split is None:
-            raise ValueError(f"dict<> missing comma: {type_str}")
-        k = inner[:split].strip()
-        v = inner[split + 1 :].strip()
+        parts = _split_top_level(inner, ",")
+        if len(parts) != 2:
+            raise ValueError(f"dict<K,V> must have exactly one top-level comma: {type_str!r}")
+        k = parts[0].strip()
+        v = parts[1].strip()
         return _check_dict_of(parse_type(k), parse_type(v))
     if type_str.startswith("struct<") and type_str.endswith(">"):
         inner = type_str[7:-1]
@@ -264,8 +256,9 @@ def parse_type(type_str: str) -> Checker:
 class StrictSignalVocabulary(SignalVocabulary):  # type: ignore[misc]
     """Vocabulary that enforces strict extras AND per-field type checks."""
 
-    def __init__(self, schema: dict[str, dict[str, Any]]) -> None:
+    def __init__(self, schema: dict[str, dict[str, Any]], version: str = "unknown") -> None:
         super().__init__(schema)
+        self.version = version
         self._field_checkers: dict[str, dict[str, Checker]] = {}
         for tag, entry in schema.items():
             if "field_types" not in entry:
@@ -314,7 +307,7 @@ def load_vocabulary(name: str = "0.2.json") -> StrictSignalVocabulary:
         }
         for tag in doc["tags"]
     }
-    return StrictSignalVocabulary(schema)
+    return StrictSignalVocabulary(schema, version=doc.get("version", "unknown"))
 
 
 class StrictSignalEmitter(SignalEmitter):  # type: ignore[misc]
@@ -327,7 +320,7 @@ class StrictSignalEmitter(SignalEmitter):  # type: ignore[misc]
 
     def __init__(
         self,
-        vocabulary: SignalVocabulary,
+        vocabulary: StrictSignalVocabulary,
         max_buffer: int = 500,
         jsonl_sink: Path | None = None,
     ) -> None:
@@ -359,6 +352,69 @@ def get_emitter() -> StrictSignalEmitter:
     return StrictSignalEmitter(load_vocabulary())
 
 
+def _exit_code_from_systemexit(code: Any) -> int:
+    """Coerce SystemExit.code to a canonical int per Python convention."""
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    return 1  # non-integer string codes conventionally exit 1
+
+
+@contextmanager
+def process_session(
+    run_kind: str,
+    config_hash: str,
+    git_sha: str,
+    data_hash: str,
+    seed: int,
+    run_id: str | None = None,
+) -> Iterator[str]:
+    """Wrap a script's work. Emits SESSION_INIT on enter, SESSION_COMPLETE on exit.
+
+    exit_code convention: 0 on clean exit; SystemExit(N) -> N; any other exception -> 1.
+    n_signals_emitted counts every signal emitted between the two boundary tags, inclusive.
+    """
+    e = get_emitter()
+    if run_id is None:
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        run_id = f"{run_kind}-{ts}-{seed}"
+    buffer_before = len(e.snapshot())
+    start = time.monotonic()
+    e.emit(
+        "SESSION_INIT",
+        run_id=run_id,
+        run_kind=run_kind,
+        vocab_version=e._vocab.version,
+        config_hash=config_hash,
+        git_sha=git_sha,
+        data_hash=data_hash,
+        seed=seed,
+    )
+    exit_code = 0
+    raised: BaseException | None = None
+    try:
+        yield run_id
+    except SystemExit as ex:
+        exit_code = _exit_code_from_systemexit(ex.code)
+        raised = ex
+    except BaseException as ex:
+        exit_code = 1
+        raised = ex
+    finally:
+        # +1 because SESSION_COMPLETE emit itself has not fired yet.
+        n = (len(e.snapshot()) - buffer_before) + 1
+        e.emit(
+            "SESSION_COMPLETE",
+            run_id=run_id,
+            exit_code=exit_code,
+            elapsed_seconds=time.monotonic() - start,
+            n_signals_emitted=n,
+        )
+    if raised is not None:
+        raise raised
+
+
 def __getattr__(name: str) -> Any:
     """PEP 562 shim: `from price_space_llm.signals import emitter` returns get_emitter()."""
     if name == "emitter":
@@ -376,6 +432,7 @@ __all__ = [
     "get_emitter",
     "load_vocabulary",
     "parse_type",
+    "process_session",
 ]
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "price-space-llm"
-version = "0.1.0"
+version = "0.10.0"
 description = "Causal decoder transformer over multi-channel 15-min market state; 32-bucket vol-normalized forward return distribution; cost-aware simulator."
 requires-python = ">=3.11"
 dependencies = []
@@ -31,7 +31,13 @@ target-version = "py311"
 extend-exclude = ["sdd-kit-2"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "PT"]
+select = ["E", "F", "I", "UP", "B", "SIM", "PT", "RUF", "ANN"]
+# ANN401 fires on Any-typed params; the type checkers deliberately accept Any.
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests accept unannotated helpers freely.
+"tests/*" = ["ANN"]
 
 [tool.mypy]
 python_version = "3.11"

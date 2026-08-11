@@ -68,6 +68,14 @@
 
 *Agent appends one entry per sprint close. Append-only.*
 
+- **Sprint 015 (2026-08-10)** — tooling + version bump (`reviews/full-review-round-1.md` §2.1 + §2.7). `[tool.ruff.lint] select` extended with `RUF` and `ANN`; `ANN401` ignored (Any-typed params in the type checkers are deliberate); tests exempted from `ANN` via `[tool.ruff.lint.per-file-ignores]`. Package version bumped from placeholder `0.1.0` to `0.10.0`. First pass ran clean — all four tools green without any code changes; the existing annotations already satisfied ANN. Wheel filename now reads `price_space_llm-0.10.0-py3-none-any.whl`. Every full-review-round-1.md punch-list item addressed after this sprint.
+
+- **Sprint 014 (2026-08-10)** — deterministic clock-reset test (`reviews/full-review-round-1.md` §2.6). `test_session_init_resets_the_clock` no longer sleeps and asserts against wall-clock; instead injects a controlled `time.monotonic` via `monkeypatch.setattr("price_space_llm.signals.time.monotonic", ...)`. Clock schedule: `[100.0, 200.0, 200.0005, 200.0005, ...]` — construction reads 100.0, SESSION_INIT emit resets to 200.0, every subsequent read returns 200.0005 (padding for the parent's Signal-t computation, the sink's Signal reconstruction, and n_signals_emitted's snapshot calls). Assert `t < 0.001` — deterministic, distinguishes reset (t == 0.0005) from no-reset (t == 100.0005). Ruff auto-fix removed the now-unused `import time` from the test file. 29 tests pass.
+
+- **Sprint 013 (2026-08-10)** — signals.py internal cleanups (`reviews/full-review-round-1.md` §1.4 + §2.4). `_parse_type` dict<K,V> branch refactored to use `_split_top_level(inner, ",")` instead of the inline depth-tracker Sprint 008 left as an anachronism; the strict "exactly one top-level comma" check catches the class of malformed declaration that Sprint 007 halted on (no such malformed types remain in v0.2). `StrictSignalEmitter.__init__` parameter type tightened from `SignalVocabulary` (parent) to `StrictSignalVocabulary` (subclass) — mypy strict now catches any caller passing a plain non-strict vocabulary. Zero test failures; zero tool findings.
+
+- **Sprint 012 (2026-08-10)** — `process_session` context manager (`reviews/full-review-round-1.md` §3.2). `StrictSignalVocabulary.__init__` gains a `version: str = "unknown"` parameter; `load_vocabulary` reads `doc["version"]` and passes it. `process_session(run_kind, config_hash, git_sha, data_hash, seed, run_id=None)` emits SESSION_INIT at enter (with `vocab_version` sourced from `get_emitter()._vocab.version` — no hardcoded constant), yields the run_id, wraps a try/except/finally that captures exit_code (0 clean; SystemExit(N) → N via `_exit_code_from_systemexit` helper; any other exception → 1), and emits SESSION_COMPLETE at exit with the correct `n_signals_emitted` count computed from a buffer-length delta plus one. Four new tests exercise: init/complete bookending, correct signal count, RuntimeError exit_code=1, SystemExit(2) exit_code=2. Test count 25 → 29. ProcessRunner operator (`signals/0.2.json § operators`) now has code, not just a name. First sprint that authors a script (Sprint 016+) wraps its work in this manager.
+
 - **Sprint 011 (2026-08-10)** — public parser API + review-driven doc updates (per `reviews/full-review-round-1.md`). Renamed `_parse_type` → `parse_type` and `_check_struct` → `check_struct`; both added to `__all__`; underscore aliases preserved for backwards compat. Every underscore-prefixed import in tests replaced with the public form. WORKING_AGREEMENT canonical home registry gains rows for `signals/0.1.json` (locked v0.1, on disk for audit), `signals/0.2.json` (loader default from Sprint 009), and `src/price_space_llm/signals.py` (package-root placement with rationale). WORKING_AGREEMENT § External SDK bridge mappings gains the dep-pin rule: first sprint that imports each SDK adds the pin to `pyproject.toml` in the same commit as the bridge mapping. BLACKBOARD § Deferred gains the BBO source gap entry. Dual contract: signal (test-time only) + artifact (25 passed; four tools green; every content assertion holds).
 
 - **Sprint 010 (2026-08-10)** — Sprint 007 redux against v0.2. `_parse_type` now raises on unknown type strings; `StrictSignalVocabulary.__init__` raises if any tag's schema entry lacks `field_types`. v0.2 loads clean because `struct` is a first-class type kind. Two new tests. 25 passed in 0.08s; all four tools green. Sprint 007 halt (`vocabulary_change_required`) resolved via the Sprint 008 + Sprint 009 + Sprint 010 chain.
@@ -147,6 +155,41 @@
 ## Sprint tail
 
 *Agent maintains. Last 10 sprint closes; older entries roll into `## Built` as compressed paragraphs.*
+
+### Sprint 015 (2026-08-10, closed)
+
+- **Scope:** ruff RUF + ANN packs; package version bump.
+- **Dual contract:** signal (test-time) + artifact (29 passed; four tools green under extended rule set; wheel builds as 0.10.0).
+- **Rubber Duck Pass:** no observations. Tools green on first run — the code was already ANN-clean from Sprint 006's strict-mypy discipline.
+- **Files:** `pyproject.toml`.
+- **Closed:** clean.
+
+### Sprint 014 (2026-08-10, closed)
+
+- **Scope:** monkeypatched clock-reset test.
+- **Dual contract:** signal (test-time) + artifact (29 passed).
+- **Rubber Duck Pass:** one iteration-count observation, resolved-here. First pass fed three values into the fake clock (`[100.0, 200.0, 200.0005]`), which the emitter exhausted on the fourth read (Signal reconstruction in the sink path calls monotonic separately from the parent's Signal). Fixed by padding the schedule with 32 copies of `200.0005` — every read after the reset returns the same value, so t stays 0.0005 regardless of how many monotonic reads the emit path makes.
+- **Files:** `tests/test_signals.py`.
+- **Closed:** clean.
+
+### Sprint 013 (2026-08-10, closed)
+
+- **Scope:** dict<K,V> refactor + StrictSignalEmitter parent-type tighten.
+- **Dual contract:** signal (test-time) + artifact (29 passed).
+- **Rubber Duck Pass:** no observations. Both refactors landed on first run.
+- **Files:** `src/price_space_llm/signals.py`.
+- **Closed:** clean.
+
+### Sprint 012 (2026-08-10, closed)
+
+- **Scope:** `process_session` context manager + StrictSignalVocabulary.version attribute.
+- **Dual contract:** signal (test-time, four new emit patterns exercised) + artifact (29 passed; four tools green).
+- **Rubber Duck Pass:**
+  - *Sequence narration.* Test 22 enters process_session, exits clean; verifies SESSION_INIT first and SESSION_COMPLETE last with exit_code=0. Test 23 emits two CHECKPOINT_WRITTEN in the middle; verifies n_signals_emitted=4 (INIT + 2 CHECKPOINTS + COMPLETE). Test 24 raises RuntimeError; verifies exit_code=1. Test 25 raises SystemExit(2); verifies exit_code=2.
+  - *Observation 1 (resolved-here).* First-pass ruff flagged `SIM117` — the two nested `with` statements in the exception tests should collapse into one `with A, B:`. Auto-fixed. Same class as Sprint 006's ruff auto-fix pattern.
+  - *Observation 2 (resolved-here).* First-pass mypy flagged `# type: ignore[attr-defined]` on `e._vocab.version` as unused — mypy is smart enough that after `StrictSignalVocabulary.version` exists, the reach doesn't need the ignore. Removed.
+- **Files:** `src/price_space_llm/signals.py`, `tests/test_signals.py`.
+- **Closed:** clean.
 
 ### Sprint 011 (2026-08-10, closed)
 
