@@ -369,13 +369,16 @@ def process_session(
     data_hash: str,
     seed: int,
     run_id: str | None = None,
+    emitter: StrictSignalEmitter | None = None,
 ) -> Iterator[str]:
     """Wrap a script's work. Emits SESSION_INIT on enter, SESSION_COMPLETE on exit.
 
     exit_code convention: 0 on clean exit; SystemExit(N) -> N; any other exception -> 1.
     n_signals_emitted counts every signal emitted between the two boundary tags, inclusive.
+    `emitter` defaults to the module singleton; pass a fresh instance to route
+    a session through a custom JSONL sink without mutating the singleton.
     """
-    e = get_emitter()
+    e = emitter if emitter is not None else get_emitter()
     if run_id is None:
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"{run_kind}-{ts}-{seed}"

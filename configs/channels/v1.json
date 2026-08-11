@@ -1,0 +1,7 @@
+{
+  "channels": [
+    {"channel": "target", "symbol": "SPY", "source": "mcp_av"},
+    {"channel": "market_context", "symbol": "VIX", "source": "mcp_av"},
+    {"channel": "market_context", "symbol": "USO", "source": "mcp_av"}
+  ]
+}
