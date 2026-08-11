@@ -73,6 +73,38 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 
 ---
 
+### 2026-08-11 — Sprint 020: Alpha-Vantage fetcher wired + live smoke closed
+
+**What happened.** `--fetcher {mock,alphavantage}` flag added to `scripts/probe_channels.py`. Live smoke against the real API on the three-channel config returned exit 2 in ~5s: `SPY` and `USO` accepted, `VIX` dropped across all five sample dates because `TIME_SERIES_INTRADAY` does not support `^VIX` — it is an index, not an intraday-priced security, and Alpha-Vantage responds `Invalid API call`. The probe caught a real ingestion gap that the config was blind to.
+
+Three emit-time crashes surfaced during the smoke loop. Each failed on a different strict-enum or type constraint on `CHANNEL_PROBED`: `actual_frequency="unknown"` failed the frequency enum; `earliest_timestamp=""` failed the ISO parser; `revision_behavior="error:AlphaVantageResponseError"` failed the revision-behavior enum. The `_error_shim` was smuggling a diagnostic (the exception class name) into fields whose semantic is observational, not diagnostic. The fourth version of the shim fabricates only vocabulary-legal values and puts the failure string on stderr; the manifest still records the drop correctly. The empty-series path in `_extract_fetch_result` had the same class of bug and got the same fix.
+
+Sink hygiene: the JSONL writer opens with `"a"`. Three crashed runs during smoke-loop iteration left 42 lines in a trace whose `SESSION_COMPLETE.n_signals_emitted` reported 21. `rm -f` + clean rerun produced the expected 21 lines. Filed for a signals-hygiene sprint (truncate on SESSION_INIT).
+
+**What worked.**
+
+- **The probe caught the VIX schema mismatch on first live contact.** No test could have surfaced it — the mock happily returned data for any symbol. The value of running against real vendors early is that the vendor itself is the schema authority; the probe's job is to route that authority's answers into a manifest before anything expensive gets built on top. `product-spec-v4.md` names channel coverage as a Phase 0 blocker; the probe now delivers that gate against real data.
+- **The `_error_shim` pattern kept the probe module untouched.** Two paths were on the table (extend `probe_channel` with an on-error callback vs wrap the fetcher). The wrap kept Sprint 016's module signature stable and pushed the error-handling responsibility to the CLI layer, which is where transport-specific errors belong.
+- **Bridge mapping earned its keep.** Sprint 018's halt recorded the exact response shape (US/Eastern, ordinal-prefixed OHLCV keys, string values). Sprint 019 wrote tests against that recorded shape via `httpx.MockTransport`; Sprint 020's live run confirmed the recorded shape was accurate — zero re-work on normalisation. The three sprint-loop (halt-and-record → author-and-test → wire-and-smoke) is the anti-guess-and-iterate pattern working.
+
+**What got in the way.**
+
+- **Strict enums on observation-tag payloads have no shape for error signals.** Every field on `CHANNEL_PROBED` is either a strict enum or a typed value; when the observation is "the fetch itself failed," the shim has to fabricate legal-but-inaccurate values or the emit crashes. Three separate crashes narrowed which fields the shim could legally set. The final shape puts the error string on stderr, invisible to any Reviewer reading only the trace. The vocabulary should probably grow a `CHANNEL_FETCH_FAILED` incident tag, or extend `revision_behavior` with an `error` enum value; filed to Surfaced-for-review with the tradeoff spelled out.
+- **The JSONL sink's append-mode assumption is right until it isn't.** Same `run_id` invocations accumulate. During normal use one invocation gets one `run_id` and this is invisible. During iterative debugging (mine, this sprint) it produces a file with two SESSION_INITs and a mismatched signal count. Truncate-on-SESSION_INIT is the honest fix.
+
+**What this says about the next kit version.**
+
+- **1. First-live-contact reveals what mock-driven tests cannot.** Sprint 016 (probe with injected mock fetcher) + Sprint 017 (CLI + mock trace) + Sprint 019 (fetcher via MockTransport) all passed on the first try. Sprint 020 hit three vocabulary crashes on the first live run because the mock returned only success-shaped `FetchResult` values; real-vendor error shapes were nowhere in the test suite. The kit's TECHNIQUES.md could name a "first-live-contact sprint" pattern: after mock-driven work stabilises, run against the actual vendor with the smallest possible surface (one call per channel, cheapest tier) and expect the first run to surface vocabulary and error-path gaps the mock could not.
+- **2. Observation-vocabulary vs error-vocabulary is a real distinction.** The kit's PRINCIPLES.md treats vocabulary as one thing. In practice this project has learned that observation tags (`CHANNEL_PROBED`) are strict about the semantics of the field values because they encode what the world looked like; error tags (`CHANNEL_FETCH_FAILED` candidate) should be lenient about vendor error strings because they encode what went wrong outside the system's control. Retrofitting the distinction is uglier than declaring it up front. Candidate for a foundations-level addendum: the observation-vs-error stratum split within an incident tag.
+
+**Hypothesis verdicts.**
+
+- **H3 (bridge-mapping-first prevents guess-and-iterate).** Confirmed strongly. Sprint 018 halted precisely because the actual API surface diverged from the documented one; Sprint 019 wrote against the recorded reality; Sprint 020's live run needed zero normalisation fixes. This is the second data point (the first was Sprint 016's MCP tool documentation stub) — the pattern holds.
+- **H6 (locked vocab → first-pass-clean downstream).** Weakened. Sprint 020 hit three vocabulary crashes on the live path. The locked vocabulary is correct for observations; it does not cover fetch failures, which the mock never exercises. First-pass-clean holds when the sprint's input matches the vocabulary's design assumptions and breaks when it doesn't — a more honest statement than the H6 original.
+- **New H9.** A "first-live-contact" sprint costs about three iteration cycles regardless of how thorough the mock-driven tests were, because real vendors surface error shapes the mock cannot. Testable across future live-contact sprints (Databento for BBO, W&B upload path).
+
+---
+
 ### 2026-08-10 — Sprint 006: tooling adoption closed
 
 **What happened.** ruff and mypy landed in `[dependency-groups] dev`. `[tool.ruff]` + `[tool.ruff.lint]` configured with E/F/I/UP/B/SIM/PT rules; `[tool.mypy]` set to strict on `src/price_space_llm`; `[[tool.mypy.overrides]]` handles the un-stubbed `sdd` module. Pytest gained `--strict-markers`, `--strict-config`, `-ra`, `filterwarnings = ["error"]`, `xfail_strict = true`. First pass ran the tools: 10 ruff findings (8 auto-fixed, 2 formatter re-flows, 1 line-too-long fixed by hand), 4 mypy findings (2 `Cannot subclass Any` from the sdd ignore-missing-imports — silenced with `# type: ignore[misc]` on the two subclasses; 2 missing dict type args — typed explicitly). Ruff's `UP` pack also modernised `timezone.utc` to `datetime.UTC` (Python 3.11+ shim). Second pass: ruff green, mypy green, 18 tests pass, wheel builds. Every item from the code review is now addressed across Sprints 003–006.

@@ -3,7 +3,9 @@ name = "price-space-llm"
 version = "0.10.0"
 description = "Causal decoder transformer over multi-channel 15-min market state; 32-bucket vol-normalized forward return distribution; cost-aware simulator."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "httpx>=0.27",
+]
 
 [build-system]
 requires = ["hatchling"]

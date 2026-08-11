@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Phase 0 channel-coverage probe CLI.
 
-Reads a channel manifest (JSON), invokes the probe against a mock fetcher,
-writes a JSONL trace to `logs/{run_id}/signals.jsonl`, writes the channel
-manifest to `data/manifests/channel_coverage.json`, prints a short stderr
-summary, exits 0 on all-accepted and 2 on any-dropped.
+Reads a channel manifest (JSON), invokes the probe against the selected
+fetcher, writes a JSONL trace to `logs/{run_id}/signals.jsonl`, writes
+the channel manifest to `data/manifests/channel_coverage.json`, prints
+a short stderr summary, exits 0 on all-accepted and 2 on any-dropped.
 
-Sprint 018 replaces the mock fetcher with the Alpha-Vantage MCP fetcher.
+--fetcher mock (default): deterministic mock; USO drops.
+--fetcher alphavantage: live Alpha-Vantage over HTTP; needs
+    ALPHAVANTAGE_API_KEY env var. Fetcher errors surface via
+    CHANNEL_REJECTED, not uncaught exceptions.
 """
 
 from __future__ import annotations
@@ -14,14 +17,23 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import traceback
 from datetime import date
 from pathlib import Path
 
+import httpx
+
+from price_space_llm.ingestion.alphavantage import (
+    AlphaVantageError,
+    make_alphavantage_fetcher,
+)
 from price_space_llm.ingestion.probe import (
     DEFAULT_SAMPLE_DATES,
     ChannelSpec,
+    Fetcher,
     FetchResult,
     run_phase_zero_probe,
 )
@@ -33,11 +45,8 @@ from price_space_llm.signals import (
 
 
 def mock_fetcher(channel: str, symbol: str, source: str, sample_date: date) -> FetchResult:
-    """Sprint 017 mock. USO drops deliberately to exercise the exit-code path.
-
-    Sprint 018 replaces this function with the real Alpha-Vantage MCP fetcher.
-    """
-    del source, sample_date  # unused in the mock
+    """Deterministic mock. USO drops so the CLI exercises the exit-2 path."""
+    del source, sample_date
     missing = 0.20 if (channel == "market_context" and symbol == "USO") else 0.001
     return FetchResult(
         actual_frequency="15min",
@@ -50,8 +59,42 @@ def mock_fetcher(channel: str, symbol: str, source: str, sample_date: date) -> F
     )
 
 
+def _error_shim(inner: Fetcher) -> Fetcher:
+    """Wrap `inner` so exceptions become a fully-missing FetchResult.
+
+    The probe reads `missing_fraction > 0.05` as a `dropped` verdict, so
+    setting `missing_fraction=1.0` is enough to route the channel to
+    CHANNEL_REJECTED with reason `missing_fraction_high`. Every other
+    field on the returned FetchResult must satisfy the v0.2 vocabulary's
+    strict enums — the failure *reason* has nowhere to live in the
+    current CHANNEL_PROBED schema, so it goes to stderr only. A later
+    sprint adds either a CHANNEL_FETCH_FAILED tag or extends
+    `revision_behavior` to include an `error` value.
+    """
+
+    def wrapped(channel: str, symbol: str, source: str, sample_date: date) -> FetchResult:
+        try:
+            return inner(channel, symbol, source, sample_date)
+        except (AlphaVantageError, NotImplementedError, httpx.HTTPError) as e:
+            print(
+                f"probe: fetcher error on {channel}/{symbol}@{sample_date}: "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+            return FetchResult(
+                actual_frequency="15min",
+                earliest_timestamp="1970-01-01T00:00:00+00:00",
+                latest_timestamp="1970-01-01T00:00:00+00:00",
+                missing_fraction=1.0,
+                timezone="UTC",
+                timestamp_semantics="bar_close",
+                revision_behavior="immutable",
+            )
+
+    return wrapped
+
+
 def _git_sha() -> str:
-    """Read HEAD SHA. Falls back to a placeholder outside a git tree."""
     try:
         out = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -68,6 +111,20 @@ def _load_config(config_path: Path) -> list[ChannelSpec]:
     return [ChannelSpec(**c) for c in doc["channels"]]
 
 
+def _resolve_fetcher(kind: str) -> Fetcher:
+    if kind == "mock":
+        return mock_fetcher
+    if kind == "alphavantage":
+        key = os.environ.get("ALPHAVANTAGE_API_KEY")
+        if not key:
+            raise SystemExit(
+                "probe: --fetcher alphavantage requires ALPHAVANTAGE_API_KEY env var "
+                "(copy .env.example to .env and fill in the key)."
+            )
+        return _error_shim(make_alphavantage_fetcher(key))
+    raise ValueError(f"unknown fetcher kind: {kind!r}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="probe_channels")
     parser.add_argument("config", type=Path, help="JSON channel manifest")
@@ -78,10 +135,21 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=Path("data/manifests/channel_coverage.json"),
     )
+    parser.add_argument(
+        "--fetcher",
+        choices=("mock", "alphavantage"),
+        default="mock",
+    )
     args = parser.parse_args(argv)
 
     if not args.config.exists():
         print(f"probe: config not found: {args.config}", file=sys.stderr)
+        return 1
+
+    try:
+        fetcher = _resolve_fetcher(args.fetcher)
+    except SystemExit as ex:
+        print(str(ex), file=sys.stderr)
         return 1
 
     channels = _load_config(args.config)
@@ -89,8 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     git_sha = _git_sha()
     data_hash = hashlib.sha256(b"probe:no-data-input").hexdigest()
 
-    # run_id first, so the sink path is bounded before the emitter opens.
-    run_id = f"probe-{args.seed:016d}"
+    run_id = f"probe-{args.fetcher}-{args.seed:016d}"
     sink_path = args.logs_dir / run_id / "signals.jsonl"
     emitter = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink_path)
 
@@ -104,13 +171,17 @@ def main(argv: list[str] | None = None) -> int:
         run_id=run_id,
         emitter=emitter,
     ):
-        coverages = run_phase_zero_probe(
-            channels,
-            DEFAULT_SAMPLE_DATES,
-            mock_fetcher,
-            emitter,
-            args.manifest,
-        )
+        try:
+            coverages = run_phase_zero_probe(
+                channels,
+                DEFAULT_SAMPLE_DATES,
+                fetcher,
+                emitter,
+                args.manifest,
+            )
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return 1
 
     n_accepted = sum(1 for c in coverages if c["verdict"] == "accepted")
     n_dropped = sum(1 for c in coverages if c["verdict"] == "dropped")

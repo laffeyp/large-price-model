@@ -46,7 +46,7 @@ def test_cli_writes_jsonl_trace_and_exits_two_on_drop(tmp_path: Path):
     result = _run(tmp_path, cfg)
     assert result.returncode == 2, result.stderr
 
-    trace = tmp_path / "logs" / "probe-0000000000000000" / "signals.jsonl"
+    trace = tmp_path / "logs" / "probe-mock-0000000000000000" / "signals.jsonl"
     assert trace.exists(), f"missing trace at {trace}; stderr:\n{result.stderr}"
 
     lines = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
@@ -81,6 +81,17 @@ def test_cli_exits_zero_when_all_accepted(tmp_path: Path):
     )
     result = _run(tmp_path, cfg)
     assert result.returncode == 0, result.stderr
+
+
+def test_cli_alphavantage_requires_api_key(tmp_path: Path, monkeypatch):
+    cfg = _write_config(
+        tmp_path,
+        [{"channel": "target", "symbol": "SPY", "source": "mcp_av"}],
+    )
+    monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
+    result = _run(tmp_path, cfg, extra=["--fetcher", "alphavantage"])
+    assert result.returncode == 1
+    assert "ALPHAVANTAGE_API_KEY" in result.stderr
 
 
 def test_cli_returns_one_on_missing_config(tmp_path: Path):
