@@ -68,6 +68,8 @@
 
 *Agent appends one entry per sprint close. Append-only.*
 
+- **Sprint 016 (2026-08-10)** — Phase 0 probe module with injected fetcher (first operator sprint). `src/price_space_llm/ingestion/probe.py` authored: `probe_channel(spec, dates, fetcher, emitter) -> ChannelCoverage` and `run_phase_zero_probe(channels, dates, fetcher, emitter, output_path) -> list[ChannelCoverage]`. Emits CHANNEL_PROBED per (channel, symbol, sample_date), CHANNEL_REJECTED when the verdict drops (missing_fraction > 0.05 or earliest_timestamp > 2015-06-15), CHANNEL_COVERAGE_ASSESSED at every channel-close with the verdict. Writes `data/manifests/channel_coverage.json` in the shape tech-arch §4.1 prescribes. Five new tests: per-date emission count, clean-channel accept, high-missing rejection, short-history rejection, multi-channel manifest write. `WORKING_AGREEMENT § External SDK bridge mappings` fleshed out from stub to a nine-tool Alpha-Vantage MCP surface plus a "Provider abstraction pattern" section that names how new providers plug in. Sprint 018 verifies the actual MCP signatures against the documented table; divergence halts with `bridge_mapping_required`. Test count 29 → 34. All four tools green. `pass_kind: functional`, `determinism_budget: bit-deterministic`. Fetcher-injection is the code-side provider abstraction the user's mid-sprint comment named; vocabulary-side (source: enum → str) surfaced separately in `## Surfaced for review` for a future decision.
+
 - **Sprint 015 (2026-08-10)** — tooling + version bump (`reviews/full-review-round-1.md` §2.1 + §2.7). `[tool.ruff.lint] select` extended with `RUF` and `ANN`; `ANN401` ignored (Any-typed params in the type checkers are deliberate); tests exempted from `ANN` via `[tool.ruff.lint.per-file-ignores]`. Package version bumped from placeholder `0.1.0` to `0.10.0`. First pass ran clean — all four tools green without any code changes; the existing annotations already satisfied ANN. Wheel filename now reads `price_space_llm-0.10.0-py3-none-any.whl`. Every full-review-round-1.md punch-list item addressed after this sprint.
 
 - **Sprint 014 (2026-08-10)** — deterministic clock-reset test (`reviews/full-review-round-1.md` §2.6). `test_session_init_resets_the_clock` no longer sleeps and asserts against wall-clock; instead injects a controlled `time.monotonic` via `monkeypatch.setattr("price_space_llm.signals.time.monotonic", ...)`. Clock schedule: `[100.0, 200.0, 200.0005, 200.0005, ...]` — construction reads 100.0, SESSION_INIT emit resets to 200.0, every subsequent read returns 200.0005 (padding for the parent's Signal-t computation, the sink's Signal reconstruction, and n_signals_emitted's snapshot calls). Assert `t < 0.001` — deterministic, distinguishes reset (t == 0.0005) from no-reset (t == 100.0005). Ruff auto-fix removed the now-unused `import time` from the test file. 29 tests pass.
@@ -105,6 +107,12 @@
 *Anyone may append. Re-visit conditions noted.*
 
 - **2026-08-09 (Agent)** — Reading the archived earlier product/tech-arch versions in full is deferred. Trigger to revisit: the Architect names a specific point of contention where the v4-vs-v2/v3 diff is load-bearing.
+
+- **2026-08-10 Claude Code (Opus 4.7)** — SURFACED: `source` type at Layer 2 is `enum<mcp_av|polygon>` — closed to two named providers. Every new provider (Databento for BBO, IEX Cloud, Binance for crypto, etc.) requires a v0.X vocabulary evolution to broaden the enum. Two paths, both defensible:
+  - **(a) Keep enum closed.** Each provider is a discrete decision. A Reviewer greps the vocabulary and gets a definitive list of known sources. Overhead: one v0.X bump per provider. Small if the list stays under ten; ceremony if the list grows quickly. Matches the vocabulary-is-the-contract commitment.
+  - **(b) Broaden to `source: str`.** Provider identifier becomes opaque. New providers just work. Loses the emit-time enum check that catches typos (`polygonio` vs `polygon`). Provider whitelist would live at Layer 6 (operator side) via a registered-fetcher pattern. Matches provider-agnostic design.
+  
+  Sprint 016 executes on path (a) — the mock fetcher passes `source="mcp_av"`, a valid enum member. The code-side is already provider-abstract via injected fetchers; the vocabulary is the remaining coupling. Trigger to revisit: the first sprint that needs a provider not currently in the enum. Likely: BBO calibration sprint (Databento or similar). At that point, weigh (a) vs (b) with a concrete second data point.
 
 - **2026-08-10 (Agent, from `reviews/full-review-round-1.md` §4.7)** — BBO source unspecified. `product-spec-v4.md § Dependencies § Data § BBO calibration` requires "any free source producing target-instrument BBO snapshots on the 2015–2022 window." Tech-arch §11.1 uses BBO as the input to `scripts/calibrate_spread.py`. The MCP tool list does not include BBO; Polygon.io fallback is for 15-min bars, not BBO. Revisit trigger: the sprint that authors `scripts/calibrate_spread.py`. Expected resolution shape: a `bridge_mapping_required` halt naming a candidate source (Databento, IEX Cloud, or an academic archive) with a specific tool + auth requirement + cost.
 
@@ -155,6 +163,18 @@
 ## Sprint tail
 
 *Agent maintains. Last 10 sprint closes; older entries roll into `## Built` as compressed paragraphs.*
+
+### Sprint 016 (2026-08-10, closed)
+
+- **Scope:** Phase 0 probe module with injected fetcher (mock source; MCP wiring deferred to Sprint 018).
+- **Dual contract:** signal (test-time; CHANNEL_PROBED + CHANNEL_COVERAGE_ASSESSED + CHANNEL_REJECTED emitted with strict-valid payloads) + artifact (34 passed; all four tools green; manifest JSON writes correctly).
+- **Observation contract:** three-channel test writes `data/manifests/channel_coverage.json` (in tmp_path) with the expected three-key shape; the SPY entry verdict is `accepted`, the deliberately-broken USO entry verdict is `dropped` with reason `missing_fraction_high`.
+- **Rubber Duck Pass:**
+  - *Sequence narration.* Test 5 emits 5 CHANNEL_PROBED + 1 CHANNEL_COVERAGE_ASSESSED (target=SPY, clean). Test 7 emits 5 CHANNEL_PROBED + 1 CHANNEL_REJECTED(reason=missing_fraction_high) + 1 CHANNEL_COVERAGE_ASSESSED(verdict=dropped). Every payload is strict-valid against v0.2. The strict-extras posture caught one initial fixture where I passed `sample_date` as a `datetime.date` object where the vocabulary declares `date_iso` (string); fixed by calling `.isoformat()` at the emit site.
+  - *Observation 1 (payload anomaly, resolved-here).* `sample_date` type: vocabulary says `date_iso` (a string in `YYYY-MM-DD` shape); code was tempted to pass a `date` object. The Layer-2 checker for `date_iso` accepts both `date` and matching string, but the trace file (JSONL) can't serialise `date` without a custom encoder. Standardised on `.isoformat()` at emit.
+  - *Observation 2 (design note, deferred).* The vocabulary's `source: enum<mcp_av|polygon>` closes to two providers. Filed in `## Surfaced for review` for the future v0.3 decision (broaden enum vs move to opaque `str`).
+- **Files:** `src/price_space_llm/ingestion/__init__.py`, `src/price_space_llm/ingestion/probe.py`, `tests/test_probe.py`, `WORKING_AGREEMENT.md` (bridge mapping expansion).
+- **Closed:** clean. Sprint 017 authors the CLI script; Sprint 018 replaces the mock fetcher with the MCP.
 
 ### Sprint 015 (2026-08-10, closed)
 

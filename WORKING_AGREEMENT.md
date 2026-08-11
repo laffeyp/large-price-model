@@ -74,12 +74,46 @@ Per AGENTS.md hard rule 10 (halt with `bridge_mapping_required` if a sprint impo
 - **Mixed precision:** `torch.amp.autocast('cuda', dtype=torch.bfloat16)`. bf16 needs no loss scaler.
 - **Bridge mapping to fill on first use:** RoPE implementation — pick one library or copy the reference implementation into `src/model/rope.py` and note the source URL here.
 
-### Alpha-Vantage-style financial-data MCP (primary data source)
+### Provider abstraction pattern
 
-- **Access:** MCP tools listed in the `mcp__claude_ai_Alpha_Vantage_MCP_Server__*` namespace (see the deferred-tools list; fetch schemas via `ToolSearch("select:<TOOL>")` before use).
-- **Tools v1 uses:** `TIME_SERIES_INTRADAY`, `TIME_SERIES_DAILY_ADJUSTED`, `FX_INTRADAY`, `CURRENCY_EXCHANGE_RATE`, `CPI`, `FEDERAL_FUNDS_RATE`, `TREASURY_YIELD`, `UNEMPLOYMENT`, `NONFARM_PAYROLL`, `HISTORICAL_OPTIONS`, `HISTORICAL_PUT_CALL_RATIO`, `HISTORICAL_VOLUME_OPEN_INTEREST_RATIO`, `EARNINGS_CALENDAR`.
-- **First use blocks on:** filling in per-tool argument surfaces, actual return shapes, timezone semantics, and revision behavior — captured by `scripts/probe_channels.py` and written to `data/manifests/channel_coverage.json`. That probe IS the bridge mapping for the MCP.
-- **Fallback:** Polygon.io for 15-minute equity bars. Bridge mapping to fill when first invoked.
+The Phase 0 probe (`src/price_space_llm/ingestion/probe.py`) takes an injected `Fetcher: Callable[[channel, symbol, source, sample_date], FetchResult]`. Every provider is one implementation of that signature. Adding a provider (Databento for BBO, Binance for crypto) is one new fetcher function; the probe module and its tests do not change. Bridge mappings below document each provider's tool surface; the fetcher wraps those tools.
+
+The vocabulary's `source` field is currently `enum<mcp_av|polygon>`. Adding a third provider means a v0.3 evolution to broaden the enum. Trigger recorded in `BLACKBOARD.md § Surfaced for review` 2026-08-10 (source-abstraction question).
+
+### Alpha-Vantage MCP (primary v1 provider — `source: "mcp_av"`)
+
+- **Access.** MCP tools in the `mcp__claude_ai_Alpha_Vantage_MCP_Server__*` namespace. The agent invokes via ToolSearch(`"select:<TOOL>"`) to fetch each tool's schema; the fetcher wrapper (Sprint 018) translates FetchResult calls into those tool invocations.
+- **v1 tool list (documented best-effort at Sprint 016; Sprint 018 verifies against the actual MCP surface and halts with `bridge_mapping_required` on divergence):**
+
+| Channel | Symbol(s) | Tool | Expected arguments | Notes |
+|---|---|---|---|---|
+| target, market_context | SPY, QQQ, IWM, VIX, TLT, DXY, GLD, USO | `TIME_SERIES_INTRADAY` | `symbol, interval, month, outputsize` | Requested `interval=15min`; downsampled from 5min if 15min unsupported per tech-arch §4.2. |
+| target, market_context (fallback) | any | `TIME_SERIES_DAILY_ADJUSTED` | `symbol, outputsize` | Coarse fallback for coverage sanity checks. |
+| macro | CPI | `CPI` | `interval` | monthly or annual. |
+| macro | FEDFUNDS | `FEDERAL_FUNDS_RATE` | `interval` | daily / weekly / monthly. |
+| macro | DGS10 | `TREASURY_YIELD` | `interval, maturity=10year` | |
+| macro | UNRATE | `UNEMPLOYMENT` | — | monthly. |
+| macro | NFP | `NONFARM_PAYROLL` | — | monthly. |
+| options | put/call ratio | `HISTORICAL_PUT_CALL_RATIO` | `symbol, date_range` | |
+| options | volume/OI | `HISTORICAL_VOLUME_OPEN_INTEREST_RATIO` | `symbol, date_range` | |
+| event | earnings | `EARNINGS_CALENDAR` | `symbol, horizon` | |
+
+- **Return shape (expected).** Per-tool returns a JSON object with a time-series keyed by timestamp. The fetcher normalises to `FetchResult` (actual_frequency, earliest_timestamp, latest_timestamp, missing_fraction, timezone, timestamp_semantics, revision_behavior) at the probe stage; the ingestion sprint (Sprint N > 018) normalises to `RawObservation` rows with the four `known_at`-schema columns.
+- **Rate limit.** 75 req/min per `IngestionClient` token bucket (tech-arch §4.2). Vocabulary invariant `INGESTION_CALL_ISSUED` cadence check enforces.
+- **Retry.** Retry-with-backoff on 429/5xx per tech-arch §4.2; fires `INGESTION_CALL_RETRIED` at each retry.
+- **Sprint 018 halt condition.** If the actual `mcp__claude_ai_Alpha_Vantage_MCP_Server__*` tool signatures diverge from the table above, halt with `bridge_mapping_required` and update this table before proceeding.
+
+### Polygon.io (fallback v1 provider — `source: "polygon"`)
+
+- **When invoked.** When Alpha-Vantage MCP returns insufficient history or wrong frequency for equity 15-min bars (tech-arch §4.2).
+- **Access.** REST HTTP API. Requires auth key (env var `POLYGON_API_KEY`); this project does not commit keys.
+- **Bridge mapping to fill on first use** (Sprint 019 or later). Tool signatures: `aggregates_bars(symbol, multiplier=15, timespan=minute, from, to)`.
+- **Fetcher wrapper.** Same signature as the MCP fetcher; substitutable at runtime.
+
+### BBO source (v1 required; provider unspecified)
+
+- **Status.** Product-spec §Dependencies §Data §BBO calibration requires it; no provider named. Filed in `BLACKBOARD.md § Deferred` 2026-08-10.
+- **Bridge mapping trigger.** The sprint that authors `scripts/calibrate_spread.py`. Candidate providers: Databento (US equity BBO), IEX Cloud, academic archives. Sprint that resolves adds a new `source` enum value via v0.3 vocabulary evolution.
 
 ### Hydra 1.3+ / Pydantic v2
 
