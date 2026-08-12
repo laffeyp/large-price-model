@@ -59,55 +59,44 @@ def _compute_val_metrics(
     val_sampler: WindowSampler,
     n_val_batches: int,
 ) -> dict[str, float]:
-    """Deterministic val pass. Returns the six metrics CHECKPOINT_WRITTEN requires."""
+    """Deterministic val pass. Returns the seven metrics CHECKPOINT_WRITTEN requires.
+
+    Sprint 032 wired real ECE / Brier / RPS via `evaluation.metrics.compute_metric_set`;
+    Sprint 031 had shipped 0.0 placeholders. This trainer path now runs the same
+    computation the offline evaluator uses.
+    """
+    from price_space_llm.evaluation.metrics import compute_metric_set
+
     model.eval()
-    total_nll = 0.0
-    total_correct_top1 = 0
-    total_correct_top3 = 0
-    total_dir_correct = 0
-    total_tokens = 0
+    all_probs: list[torch.Tensor] = []
+    all_targets: list[torch.Tensor] = []
     vocab_size = model.config.vocab_size
     with torch.no_grad():
         for _ in range(n_val_batches):
             batch = val_sampler.sample()
             logits = model(batch.inputs)  # (B, T, V)
-            log_probs = F.log_softmax(logits, dim=-1)
-            targets = batch.targets  # (B, T)
-            nll = F.nll_loss(
-                log_probs.reshape(-1, vocab_size),
-                targets.reshape(-1),
-                reduction="sum",
-            )
-            total_nll += float(nll.item())
-            probs = log_probs.exp()
-            preds = probs.argmax(dim=-1)  # (B, T)
-            total_correct_top1 += int((preds == targets).sum().item())
-            top3 = probs.topk(3, dim=-1).indices  # (B, T, 3)
-            total_correct_top3 += int((top3 == targets.unsqueeze(-1)).any(dim=-1).sum().item())
-            # Direction: bucket_id above median → "up," else "down."
-            median = vocab_size // 2
-            pred_up = preds >= median
-            tgt_up = targets >= median
-            total_dir_correct += int((pred_up == tgt_up).sum().item())
-            total_tokens += targets.numel()
+            probs = F.softmax(logits, dim=-1).reshape(-1, vocab_size)
+            targets = batch.targets.reshape(-1)
+            all_probs.append(probs)
+            all_targets.append(targets)
     model.train()
-    if total_tokens == 0:
+    if not all_probs:
+        raise ValueError("val pass produced zero batches; check n_val_batches")
+
+    probs_cat = torch.cat(all_probs, dim=0)
+    targets_cat = torch.cat(all_targets, dim=0)
+    if probs_cat.shape[0] == 0:
         raise ValueError("val pass produced zero tokens; check batch_size and n_val_batches")
 
-    val_nll = total_nll / total_tokens
-    # ECE and Brier are placeholders on Sprint 031 (need calibration bins + one-hot targets).
-    # Report neutral values so CHECKPOINT_WRITTEN emits validly; Sprint 032 wires the real ones.
-    val_ece = 0.0
-    val_brier = 0.0
-    val_rps = 0.0  # ranked-probability-score, deferred
+    ms = compute_metric_set(probs_cat, targets_cat, vocab_size)
     return {
-        "val_nll": val_nll,
-        "val_ece": val_ece,
-        "val_brier": val_brier,
-        "val_rps": val_rps,
-        "val_dir_acc": total_dir_correct / total_tokens,
-        "val_top1": total_correct_top1 / total_tokens,
-        "val_top3": total_correct_top3 / total_tokens,
+        "val_nll": ms.nll,
+        "val_ece": ms.ece,
+        "val_brier": ms.brier,
+        "val_rps": ms.rps,
+        "val_dir_acc": ms.dir_acc,
+        "val_top1": ms.top1,
+        "val_top3": ms.top3,
     }
 
 
