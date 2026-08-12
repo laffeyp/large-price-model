@@ -9,7 +9,9 @@ from price_space_llm.ingestion.alphavantage import (
     AlphaVantageError,
     AlphaVantageRateLimitError,
     AlphaVantageResponseError,
+    alphavantage_extract_metadata,
     make_alphavantage_fetcher,
+    make_alphavantage_raw_fetcher,
 )
 
 
@@ -189,3 +191,74 @@ def test_alphavantage_error_hierarchy():
     """Both concrete errors are AlphaVantageError subclasses (for one-catch handling)."""
     assert issubclass(AlphaVantageResponseError, AlphaVantageError)
     assert issubclass(AlphaVantageRateLimitError, AlphaVantageError)
+
+
+# make_alphavantage_raw_fetcher --------------------------------------------
+
+
+def test_raw_fetcher_returns_dict_verbatim():
+    payload = _canned_intraday(n_bars=10)
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    fetcher = make_alphavantage_raw_fetcher("k", client=_client_with(handler))
+    out = fetcher("TIME_SERIES_INTRADAY", {"symbol": "SPY", "interval": "15min"})
+    assert out == payload
+
+
+def test_raw_fetcher_passes_params_and_apikey():
+    captured: dict = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=_canned_intraday(n_bars=5))
+
+    fetcher = make_alphavantage_raw_fetcher("test-key-abc", client=_client_with(handler))
+    fetcher("TIME_SERIES_INTRADAY", {"symbol": "SPY", "month": "2024-06"})
+    assert "function=TIME_SERIES_INTRADAY" in captured["url"]
+    assert "symbol=SPY" in captured["url"]
+    assert "month=2024-06" in captured["url"]
+    assert "apikey=test-key-abc" in captured["url"]
+
+
+def test_raw_fetcher_raises_on_error_message():
+    def handler(request):
+        return httpx.Response(200, json={"Error Message": "boom"})
+
+    fetcher = make_alphavantage_raw_fetcher("k", client=_client_with(handler))
+    with pytest.raises(AlphaVantageResponseError, match="boom"):
+        fetcher("TIME_SERIES_INTRADAY", {"symbol": "SPY"})
+
+
+def test_raw_fetcher_raises_on_note_rate_limit():
+    def handler(request):
+        return httpx.Response(200, json={"Note": "throttled"})
+
+    fetcher = make_alphavantage_raw_fetcher("k", client=_client_with(handler))
+    with pytest.raises(AlphaVantageRateLimitError, match="throttled"):
+        fetcher("TIME_SERIES_INTRADAY", {"symbol": "SPY"})
+
+
+# alphavantage_extract_metadata --------------------------------------------
+
+
+def test_extract_metadata_finds_batch_high_watermark():
+    payload = _canned_intraday(n_bars=100)
+    meta = alphavantage_extract_metadata(payload)
+    assert meta["rows_written"] == 100
+    # value_time is the newest bar in UTC (US/Eastern -5 fixed → UTC +5 shift)
+    assert meta["value_time"].year == 2015
+    assert meta["value_time"].month == 6
+    # known_at is value_time + 1 minute
+    assert (meta["known_at"] - meta["value_time"]).total_seconds() == 60.0
+
+
+def test_extract_metadata_raises_on_missing_time_series_key():
+    with pytest.raises(AlphaVantageResponseError, match="no 'Time Series"):
+        alphavantage_extract_metadata({"Meta Data": {}})
+
+
+def test_extract_metadata_raises_on_empty_series():
+    with pytest.raises(AlphaVantageResponseError, match="empty Time Series"):
+        alphavantage_extract_metadata({"Time Series (15min)": {}})

@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from price_space_llm.ingestion.client import ObservationMetadata, RawFetcher
 from price_space_llm.ingestion.probe import Fetcher, FetchResult
 
 ALPHAVANTAGE_BASE_URL = "https://www.alphavantage.co"
@@ -166,10 +167,83 @@ def make_alphavantage_fetcher(
     return fetch
 
 
+def make_alphavantage_raw_fetcher(
+    api_key: str,
+    client: httpx.Client | None = None,
+) -> RawFetcher:
+    """Return a `RawFetcher` closure that returns the raw Alpha-Vantage JSON dict.
+
+    Distinct from `make_alphavantage_fetcher` (probe-shape) — this one is
+    for `IngestionClient`, which needs the full response dict for caching
+    and downstream feature extraction. Signature: `(tool, params) -> dict`.
+
+    Passes `params` through to Alpha-Vantage verbatim with `function=tool`
+    and `apikey` appended. The caller supplies every other param (`symbol`,
+    `interval`, `month`, `datatype`, `outputsize`, etc.).
+    """
+    http = (
+        client if client is not None else httpx.Client(base_url=ALPHAVANTAGE_BASE_URL, timeout=30.0)
+    )
+
+    def fetch(tool: str, params: dict[str, Any]) -> dict[str, Any]:
+        query_params = {"function": tool, "apikey": api_key, **params}
+        response = http.get("/query", params=query_params)
+        response.raise_for_status()
+        payload = response.json()
+        _check_error_payload(payload)
+        if not isinstance(payload, dict):
+            raise AlphaVantageResponseError(
+                f"expected JSON object at /query, got {type(payload).__name__}"
+            )
+        return payload
+
+    return fetch
+
+
+def alphavantage_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
+    """Extract ObservationMetadata from a TIME_SERIES_INTRADAY response.
+
+    `value_time`: the newest bar's timestamp in UTC (batch high-watermark).
+    `known_at`: `value_time + 1 minute` — a simplification for historical
+        monthly pulls. Real streaming ingestion would carry the vendor's
+        release-time header; this approximation holds for cached historical
+        bars whose known_at is definitionally after their value_time.
+    `rows_written`: the count of bars in the response's Time Series map.
+
+    Raises `AlphaVantageResponseError` if the response has no recognisable
+    Time Series (empty month, malformed response). The caller — normally
+    IngestionClient.call — surfaces that up.
+    """
+    series_key = next(
+        (k for k in response if k.startswith("Time Series")),
+        None,
+    )
+    if series_key is None:
+        raise AlphaVantageResponseError(
+            "response has no 'Time Series ...' key; cannot extract metadata"
+        )
+    series: dict[str, dict[str, str]] = response[series_key]
+    if not series:
+        raise AlphaVantageResponseError(
+            "empty Time Series; extractor has no observations to describe"
+        )
+    latest_us_eastern = max(series.keys())
+    naive = datetime.strptime(latest_us_eastern, "%Y-%m-%d %H:%M:%S")
+    value_time = naive.replace(tzinfo=timezone(US_EASTERN_OFFSET)).astimezone(UTC)
+    known_at = value_time + timedelta(minutes=1)
+    return {
+        "value_time": value_time,
+        "known_at": known_at,
+        "rows_written": len(series),
+    }
+
+
 __all__ = [
     "EXPECTED_BARS_PER_TRADING_MONTH",
     "AlphaVantageError",
     "AlphaVantageRateLimitError",
     "AlphaVantageResponseError",
+    "alphavantage_extract_metadata",
     "make_alphavantage_fetcher",
+    "make_alphavantage_raw_fetcher",
 ]

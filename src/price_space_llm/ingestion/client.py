@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from price_space_llm.ingestion import cache as _cache
 from price_space_llm.ingestion.ratelimit import (
@@ -33,6 +33,23 @@ from price_space_llm.ingestion.ratelimit import (
 from price_space_llm.signals import StrictSignalEmitter
 
 RawFetcher = Callable[[str, dict[str, Any]], dict[str, Any]]
+
+
+class ObservationMetadata(TypedDict):
+    """What the caller extracts from a vendor response to populate RAW_OBSERVATION_WRITTEN.
+
+    value_time: the primary observation time (batch high-watermark for multi-row responses).
+    known_at: when the caller learned about the data; for historical bars typically
+        `value_time + 1 minute`, for streaming ingestion the wall-clock stamp at receipt.
+    rows_written: the count of observations the response carried into the cache.
+    """
+
+    value_time: datetime
+    known_at: datetime
+    rows_written: int
+
+
+ExtractMetadata = Callable[[dict[str, Any]], ObservationMetadata]
 
 
 class IngestionCallFailed(RuntimeError):
@@ -85,24 +102,29 @@ class IngestionClient:
         symbol: str,
         tool: str,
         params: dict[str, Any],
-        value_time: datetime,
-        known_at: datetime,
-        rows_written: int,
+        extract_metadata: ExtractMetadata,
     ) -> dict[str, Any]:
         """Fetch, cache, emit. Returns the response payload dict.
 
         Cache-hit path: emits INGESTION_CALL_CACHED, returns cached payload,
-        no fetcher call, no RAW_OBSERVATION_WRITTEN.
+        no fetcher call, no RAW_OBSERVATION_WRITTEN, no extract_metadata call.
 
         Cache-miss path: acquire rate token, call primary. On failure and
         with fallback set, emit SOURCE_FALLBACK_TRIGGERED, acquire fallback
         token, call fallback. Emit INGESTION_CALL_ISSUED for each fetcher
-        invocation. On success, cache the payload and emit
+        invocation. On success, cache the payload, call extract_metadata to
+        derive value_time / known_at / rows_written from the response, emit
         RAW_OBSERVATION_WRITTEN; if a prior cached copy existed with a
         different payload hash, also emit REVISION_LANDED.
+
+        `extract_metadata` is caller-provided because the observation-time
+        and row-count are properties of the vendor response, unknown until
+        the response returns. Alpha-Vantage callers use
+        `alphavantage.alphavantage_extract_metadata`; other providers
+        supply their own extractor.
         """
         key = _cache.cache_key(tool, channel, symbol, params)
-        params_hash = key  # payload hash of the request, per v0.2 vocabulary
+        params_hash = key
 
         path = _cache.cache_path(self._cache_dir, self._primary_source, tool, key)
         cached = _cache.read(path)
@@ -132,17 +154,16 @@ class IngestionClient:
         prior_hash_int = int(prior_hash[:15], 16) if prior_hash is not None else 0
         _cache.write(target_path, response)
 
-        released_at = known_at
-
+        meta = extract_metadata(response)
         self._emitter.emit(
             "RAW_OBSERVATION_WRITTEN",
             source=source_used,
             channel=channel,
             symbol=symbol,
-            value_time=value_time.isoformat(),
-            released_at=released_at.isoformat(),
-            known_at=known_at.isoformat(),
-            rows_written=rows_written,
+            value_time=meta["value_time"].isoformat(),
+            released_at=meta["known_at"].isoformat(),
+            known_at=meta["known_at"].isoformat(),
+            rows_written=meta["rows_written"],
             revision_id=new_hash_int,
         )
 
@@ -152,7 +173,7 @@ class IngestionClient:
                 source=source_used,
                 channel=channel,
                 symbol=symbol,
-                value_time=value_time.isoformat(),
+                value_time=meta["value_time"].isoformat(),
                 prior_revision_id=prior_hash_int,
                 new_revision_id=new_hash_int,
             )
@@ -227,7 +248,9 @@ class IngestionClient:
 
 
 __all__ = [
+    "ExtractMetadata",
     "IngestionCallFailed",
     "IngestionClient",
+    "ObservationMetadata",
     "RawFetcher",
 ]

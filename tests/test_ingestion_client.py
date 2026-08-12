@@ -52,15 +52,18 @@ def _tags(sink: Path) -> list[str]:
     return [s["tag"] for s in _read_trace(sink)]
 
 
+def _static_metadata(_response: dict[str, Any]) -> dict[str, Any]:
+    """Test-only extractor: returns fixed metadata regardless of response shape."""
+    return {"value_time": VALUE_TIME, "known_at": KNOWN_AT, "rows_written": 100}
+
+
 def _call(client: IngestionClient, **overrides: Any) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "channel": "target",
         "symbol": "SPY",
         "tool": "TIME_SERIES_INTRADAY",
         "params": {"interval": "15min", "month": "2024-06"},
-        "value_time": VALUE_TIME,
-        "known_at": KNOWN_AT,
-        "rows_written": 100,
+        "extract_metadata": _static_metadata,
     }
     kwargs.update(overrides)
     return client.call(**kwargs)
