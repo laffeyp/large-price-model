@@ -33,7 +33,7 @@ def _run(
         str(SCRIPT),
         "--manifest",
         str(manifest),
-        "--month",
+        "--start-month",
         "2024-06",
         "--cache-dir",
         str(tmp_path / "cache"),
@@ -134,3 +134,53 @@ def test_cli_empty_manifest_exits_one(tmp_path: Path):
     result = _run(tmp_path, manifest)
     assert result.returncode == 1
     assert "no accepted channels" in result.stderr
+
+
+def test_cli_month_range_produces_call_per_month_per_channel(tmp_path: Path):
+    """--start-month 2024-06 --end-month 2024-08 with 2 channels → 6 fetches."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {"channel": "target", "symbol": "SPY", "source": "mcp_av", "verdict": "accepted"},
+            {
+                "channel": "market_context",
+                "symbol": "USO",
+                "source": "mcp_av",
+                "verdict": "accepted",
+            },
+        ],
+    )
+    result = _run(tmp_path, manifest, extra=["--end-month", "2024-08"])
+    assert result.returncode == 0, result.stderr
+    trace = tmp_path / "logs" / "ingest-mock-2024-06_2024-08-0000000000000000" / "signals.jsonl"
+    assert trace.exists()
+    lines = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    tags = [line["tag"] for line in lines]
+    # 3 months x 2 channels = 6 fetches
+    assert tags.count("INGESTION_CALL_ISSUED") == 6
+    assert tags.count("RAW_OBSERVATION_WRITTEN") == 6
+
+    cache_files = list((tmp_path / "cache").rglob("*.json"))
+    assert len(cache_files) == 6
+
+
+def test_cli_month_range_rejects_backwards_range(tmp_path: Path):
+    manifest = _write_manifest(
+        tmp_path,
+        [{"channel": "target", "symbol": "SPY", "source": "mcp_av", "verdict": "accepted"}],
+    )
+    result = _run(tmp_path, manifest, extra=["--end-month", "2024-05"])  # < start_month
+    assert result.returncode == 1
+    assert "precedes" in result.stderr
+
+
+def test_cli_single_month_run_id_omits_end_suffix(tmp_path: Path):
+    """--start-month 2024-06 alone → run_id contains 2024-06, not 2024-06_2024-06."""
+    manifest = _write_manifest(
+        tmp_path,
+        [{"channel": "target", "symbol": "SPY", "source": "mcp_av", "verdict": "accepted"}],
+    )
+    result = _run(tmp_path, manifest)
+    assert result.returncode == 0
+    trace = tmp_path / "logs" / "ingest-mock-2024-06-0000000000000000" / "signals.jsonl"
+    assert trace.exists()
