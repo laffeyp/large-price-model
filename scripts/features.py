@@ -16,6 +16,7 @@ import sys
 import traceback
 from pathlib import Path
 
+from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.features import run_feature_pipeline
 from price_space_llm.signals import (
     StrictSignalEmitter,
@@ -47,6 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, default=Path("data/features"))
     parser.add_argument("--logs-dir", type=Path, default=Path("logs"))
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/experiment/v1.json"),
+        help="ExperimentConfig JSON. Validated by pydantic; CONFIG_RESOLVED fires on success.",
+    )
     args = parser.parse_args(argv)
 
     if not args.aligned.exists():
@@ -63,15 +70,21 @@ def main(argv: list[str] | None = None) -> int:
     data_hash = hashlib.sha256(aligned_bytes).hexdigest()
 
     result = None
+    git_sha = _git_sha()
     with process_session(
         run_kind="train",  # v0.3 has no `feature` run_kind; train covers upstream prep.
         config_hash=config_hash,
-        git_sha=_git_sha(),
+        git_sha=git_sha,
         data_hash=data_hash,
         seed=args.seed,
         run_id=run_id,
         emitter=emitter,
     ):
+        try:
+            load_config(args.config, emitter=emitter, run_id=run_id, git_sha=git_sha)
+        except ConfigValidationFailed as ex:
+            print(f"features: config invalid: {ex}", file=sys.stderr)
+            return 1
         try:
             result = run_feature_pipeline(
                 aligned_path=args.aligned,
