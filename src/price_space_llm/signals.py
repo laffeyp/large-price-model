@@ -335,6 +335,12 @@ class StrictSignalEmitter(SignalEmitter):  # type: ignore[misc]
         if self._jsonl_sink is not None:
             if not self._sink_prepared:
                 self._jsonl_sink.parent.mkdir(parents=True, exist_ok=True)
+                # SESSION_INIT owns its trace file. Same-run_id re-invocations
+                # (common during iterative debugging) would otherwise append to
+                # the prior run's file and produce a trace with two SESSION_INIT
+                # lines and a mismatched n_signals_emitted.
+                if tag == "SESSION_INIT" and self._jsonl_sink.exists():
+                    self._jsonl_sink.unlink()
                 self._sink_prepared = True
             signal = Signal(
                 tag=tag,
