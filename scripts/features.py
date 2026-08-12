@@ -4,37 +4,21 @@
 Reads `data/aligned/{align_run_id}.parquet`, computes strictly-causal
 features per tech-arch §6, writes `data/features/{run_id}.parquet`.
 Emits FEATURE_COMPUTED / FEATURE_COMPUTATION_FAILED per (channel,
-feature, timestamp) with honest reason enums on failures.
+feature, timestamp) with honest reason enums on failures. Also emits
+CONFIG_RESOLVED at session open (Sprint 028), enforcing the tech-arch
+§11.3 registration gate on lambda_risk + alpha_mag_weight.
 """
-
-from __future__ import annotations
 
 import argparse
 import hashlib
-import subprocess
 import sys
 import traceback
 from pathlib import Path
 
 from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.features import run_feature_pipeline
-from price_space_llm.signals import (
-    StrictSignalEmitter,
-    load_vocabulary,
-    process_session,
-)
-
-
-def _git_sha() -> str:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return out.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "0" * 40
+from price_space_llm.git import git_sha
+from price_space_llm.script_harness import script_session
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,27 +45,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     run_id = f"features-{args.aligned.stem}-{args.seed:016d}"
-    sink_path = args.logs_dir / run_id / "signals.jsonl"
     output_path = args.output_dir / f"{run_id}.parquet"
-
-    emitter = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink_path)
     aligned_bytes = args.aligned.read_bytes()
     config_hash = hashlib.sha256(aligned_bytes).hexdigest()
     data_hash = hashlib.sha256(aligned_bytes).hexdigest()
 
     result = None
-    git_sha = _git_sha()
-    with process_session(
+    with script_session(
         run_kind="train",  # v0.3 has no `feature` run_kind; train covers upstream prep.
+        run_id=run_id,
         config_hash=config_hash,
-        git_sha=git_sha,
         data_hash=data_hash,
         seed=args.seed,
-        run_id=run_id,
-        emitter=emitter,
-    ):
+        logs_dir=args.logs_dir,
+    ) as (emitter, sink_path):
         try:
-            load_config(args.config, emitter=emitter, run_id=run_id, git_sha=git_sha)
+            load_config(args.config, emitter=emitter, run_id=run_id, git_sha=git_sha())
         except ConfigValidationFailed as ex:
             print(f"features: config invalid: {ex}", file=sys.stderr)
             return 1
@@ -98,8 +77,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if result is not None:
         print(
-            f"features: {result['n_features_emitted']} emitted, {result['n_failures']} failed "
-            f"in {result['elapsed_seconds']:.2f}s; output={result['output_path']}; "
+            f"features: {result.n_features_emitted} emitted, {result.n_failures} failed "
+            f"in {result.elapsed_seconds:.2f}s; output={result.output_path}; "
             f"trace={sink_path}",
             file=sys.stderr,
         )

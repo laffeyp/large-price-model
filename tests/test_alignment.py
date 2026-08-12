@@ -253,7 +253,7 @@ def test_run_alignment_writes_parquet_and_emits_summary(tmp_path: Path):
         run_id="test-align",
     )
     assert output.exists()
-    assert result["total_rows"] > 0
+    assert result.total_rows > 0
     tags = [s.tag for s in e.snapshot()]
     assert tags[0] == "ALIGNMENT_RUN_STARTED"
     assert tags[-1] == "ALIGNMENT_RUN_COMPLETED"

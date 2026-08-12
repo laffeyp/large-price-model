@@ -16,13 +16,12 @@ Simplifications documented on `## Drift watchlist` (2026-08-11):
   Refined when `pandas_market_calendars` lands.
 """
 
-from __future__ import annotations
-
 import json
 import time
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 import polars as pl
 
@@ -37,7 +36,8 @@ RTH_CLOSE_US_EASTERN_MINUTES = 16 * 60  # 16:00 EST
 BAR_MINUTES = 15
 
 
-class AlignmentResult(TypedDict):
+@dataclass(slots=True, frozen=True, kw_only=True)
+class AlignmentResult:
     run_id: str
     total_rows: int
     missing_fractions_per_channel: dict[str, float]

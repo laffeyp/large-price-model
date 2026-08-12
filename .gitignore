@@ -27,6 +27,7 @@ data/raw/
 data/aligned/
 data/tokenized/
 data/manifests/
+data/features/
 artifacts/
 logs/
 wandb/

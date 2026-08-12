@@ -231,11 +231,11 @@ def alphavantage_extract_metadata(response: dict[str, Any]) -> ObservationMetada
     naive = datetime.strptime(latest_us_eastern, "%Y-%m-%d %H:%M:%S")
     value_time = naive.replace(tzinfo=timezone(US_EASTERN_OFFSET)).astimezone(UTC)
     known_at = value_time + timedelta(minutes=1)
-    return {
-        "value_time": value_time,
-        "known_at": known_at,
-        "rows_written": len(series),
-    }
+    return ObservationMetadata(
+        value_time=value_time,
+        known_at=known_at,
+        rows_written=len(series),
+    )
 
 
 __all__ = [

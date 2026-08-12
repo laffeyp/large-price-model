@@ -13,6 +13,7 @@ from price_space_llm.ingestion import cache as _cache
 from price_space_llm.ingestion.client import (
     IngestionCallFailed,
     IngestionClient,
+    ObservationMetadata,
 )
 from price_space_llm.signals import StrictSignalEmitter, load_vocabulary
 
@@ -52,9 +53,9 @@ def _tags(sink: Path) -> list[str]:
     return [s["tag"] for s in _read_trace(sink)]
 
 
-def _static_metadata(_response: dict[str, Any]) -> dict[str, Any]:
+def _static_metadata(_response: dict[str, Any]) -> ObservationMetadata:
     """Test-only extractor: returns fixed metadata regardless of response shape."""
-    return {"value_time": VALUE_TIME, "known_at": KNOWN_AT, "rows_written": 100}
+    return ObservationMetadata(value_time=VALUE_TIME, known_at=KNOWN_AT, rows_written=100)
 
 
 def _call(client: IngestionClient, **overrides: Any) -> dict[str, Any]:

@@ -1,43 +1,24 @@
 #!/usr/bin/env python3
-"""Alignment CLI — reads cached bars, runs the 15-min UTC RTH join_asof, writes parquet.
+"""Alignment CLI -- reads cached bars, runs the 15-min UTC RTH join_asof, writes parquet.
 
 Reads `data/manifests/channel_coverage.json` for the accepted-channel
 set. For each accepted (channel, symbol), loads the cached raw response
 under `data/raw/`, converts to a bar DataFrame, joins into a fixed
-15-min UTC RTH grid keyed on `known_at` (strategy=backward — the
+15-min UTC RTH grid keyed on `known_at` (strategy=backward -- the
 alignment invariant per tech-arch §17), and writes the wide aligned
 DataFrame to `data/aligned/{run_id}.parquet`.
 
 Emits the four align-category signals per v0.3 vocabulary.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
-import subprocess
 import sys
 import traceback
 from pathlib import Path
 
 from price_space_llm.alignment import run_alignment
-from price_space_llm.signals import (
-    StrictSignalEmitter,
-    load_vocabulary,
-    process_session,
-)
-
-
-def _git_sha() -> str:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return out.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "0" * 40
+from price_space_llm.script_harness import script_session
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,26 +40,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     run_id = f"align-{args.month}-{args.seed:016d}"
-    sink_path = args.logs_dir / run_id / "signals.jsonl"
     output_path = args.output_dir / f"{run_id}.parquet"
-
-    emitter = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink_path)
 
     manifest_bytes = args.manifest.read_bytes()
     config_hash = hashlib.sha256(f"{args.month}:{manifest_bytes.hex()}".encode()).hexdigest()
     data_hash = hashlib.sha256(manifest_bytes).hexdigest()
 
-    exit_code = 0
     result = None
-    with process_session(
+    with script_session(
         run_kind="align",
+        run_id=run_id,
         config_hash=config_hash,
-        git_sha=_git_sha(),
         data_hash=data_hash,
         seed=args.seed,
-        run_id=run_id,
-        emitter=emitter,
-    ):
+        logs_dir=args.logs_dir,
+    ) as (emitter, sink_path):
         try:
             result = run_alignment(
                 manifest_path=args.manifest,
@@ -94,15 +70,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if result is not None:
         missing_summary = ", ".join(
-            f"{k}={v:.3f}" for k, v in result["missing_fractions_per_channel"].items()
+            f"{k}={v:.3f}" for k, v in result.missing_fractions_per_channel.items()
         )
         print(
-            f"align: {result['total_rows']} rows in {result['elapsed_seconds']:.2f}s; "
-            f"missing_fractions=[{missing_summary}]; output={result['output_path']}; "
+            f"align: {result.total_rows} rows in {result.elapsed_seconds:.2f}s; "
+            f"missing_fractions=[{missing_summary}]; output={result.output_path}; "
             f"trace={sink_path}",
             file=sys.stderr,
         )
-    return exit_code
+    return 0
 
 
 if __name__ == "__main__":

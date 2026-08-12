@@ -58,12 +58,12 @@ def test_fetcher_returns_fetch_result_on_clean_response():
 
     fetcher = make_alphavantage_fetcher("k", client=_client_with(handler))
     result = fetcher("target", "SPY", "mcp_av", date(2015, 6, 15))
-    assert result["actual_frequency"] == "15min"
-    assert result["timezone"] == "UTC"
-    assert result["timestamp_semantics"] == "bar_close"
-    assert result["missing_fraction"] == pytest.approx(0.0)
-    assert result["earliest_timestamp"].startswith("2015-06-01")
-    assert result["earliest_timestamp"].endswith("+00:00")
+    assert result.actual_frequency == "15min"
+    assert result.timezone == "UTC"
+    assert result.timestamp_semantics == "bar_close"
+    assert result.missing_fraction == pytest.approx(0.0)
+    assert result.earliest_timestamp.startswith("2015-06-01")
+    assert result.earliest_timestamp.endswith("+00:00")
 
 
 def test_fetcher_missing_fraction_scales_with_bar_count():
@@ -73,7 +73,7 @@ def test_fetcher_missing_fraction_scales_with_bar_count():
 
     fetcher = make_alphavantage_fetcher("k", client=_client_with(handler))
     result = fetcher("target", "SPY", "mcp_av", date(2015, 6, 15))
-    assert result["missing_fraction"] == pytest.approx(0.5, abs=0.01)
+    assert result.missing_fraction == pytest.approx(0.5, abs=0.01)
 
 
 def test_fetcher_normalises_us_eastern_to_utc():
@@ -98,7 +98,7 @@ def test_fetcher_normalises_us_eastern_to_utc():
 
     fetcher = make_alphavantage_fetcher("k", client=_client_with(handler))
     result = fetcher("target", "SPY", "mcp_av", date(2015, 6, 15))
-    assert result["earliest_timestamp"] == "2015-06-15T14:30:00+00:00"
+    assert result.earliest_timestamp == "2015-06-15T14:30:00+00:00"
 
 
 def test_fetcher_raises_on_error_message_payload():
@@ -246,12 +246,12 @@ def test_raw_fetcher_raises_on_note_rate_limit():
 def test_extract_metadata_finds_batch_high_watermark():
     payload = _canned_intraday(n_bars=100)
     meta = alphavantage_extract_metadata(payload)
-    assert meta["rows_written"] == 100
+    assert meta.rows_written == 100
     # value_time is the newest bar in UTC (US/Eastern -5 fixed → UTC +5 shift)
-    assert meta["value_time"].year == 2015
-    assert meta["value_time"].month == 6
+    assert meta.value_time.year == 2015
+    assert meta.value_time.month == 6
     # known_at is value_time + 1 minute
-    assert (meta["known_at"] - meta["value_time"]).total_seconds() == 60.0
+    assert (meta.known_at - meta.value_time).total_seconds() == 60.0
 
 
 def test_extract_metadata_raises_on_missing_time_series_key():

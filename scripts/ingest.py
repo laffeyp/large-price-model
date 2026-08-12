@@ -15,13 +15,10 @@ Free-tier budget: 25 requests/day. `N_channels * N_months` fetches per
 invocation; every cache-hit costs zero.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import time
 import traceback
@@ -32,23 +29,7 @@ from price_space_llm.ingestion.alphavantage import (
     make_alphavantage_raw_fetcher,
 )
 from price_space_llm.ingestion.client import IngestionCallFailed, IngestionClient, RawFetcher
-from price_space_llm.signals import (
-    StrictSignalEmitter,
-    load_vocabulary,
-    process_session,
-)
-
-
-def _git_sha() -> str:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return out.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "0" * 40
+from price_space_llm.script_harness import script_session
 
 
 def _month_range(start: str, end: str) -> list[str]:
@@ -96,11 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="YYYY-MM (inclusive). Defaults to `--start-month` (single-month run).",
     )
-    parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=Path("data/raw"),
-    )
+    parser.add_argument("--cache-dir", type=Path, default=Path("data/raw"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--logs-dir", type=Path, default=Path("logs"))
     parser.add_argument(
@@ -135,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        raw_fetcher = make_alphavantage_raw_fetcher(key)
+        raw_fetcher: RawFetcher = make_alphavantage_raw_fetcher(key)
     else:
         raw_fetcher = _mock_raw_fetcher()
 
@@ -143,37 +120,30 @@ def main(argv: list[str] | None = None) -> int:
         args.start_month if end_month == args.start_month else f"{args.start_month}_{end_month}"
     )
     run_id = f"ingest-{args.fetcher}-{span_tag}-{args.seed:016d}"
-    sink_path = args.logs_dir / run_id / "signals.jsonl"
-    emitter = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink_path)
-
-    manifest_hash = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
+    manifest_bytes = args.manifest.read_bytes()
+    manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     config_hash = hashlib.sha256(f"{span_tag}:{manifest_hash}".encode()).hexdigest()
-    data_hash = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
-    git_sha = _git_sha()
-
-    # IngestionClient's primary_source is a data-provenance label; matches the
-    # channel manifest entries (which all carry source="mcp_av" post-probe).
-    primary_source = channels[0]["source"]
-    client = IngestionClient(
-        primary=raw_fetcher,
-        primary_source=primary_source,
-        cache_dir=args.cache_dir,
-        emitter=emitter,
-        clock=time.monotonic,
-    )
+    data_hash = manifest_hash
 
     exit_code = 0
     n_ok = 0
     n_failed = 0
-    with process_session(
+    with script_session(
         run_kind="probe",  # v0.3 has no `ingest` run_kind yet; probe covers Phase 0 + Phase 1
+        run_id=run_id,
         config_hash=config_hash,
-        git_sha=git_sha,
         data_hash=data_hash,
         seed=args.seed,
-        run_id=run_id,
-        emitter=emitter,
-    ):
+        logs_dir=args.logs_dir,
+    ) as (emitter, sink_path):
+        primary_source = channels[0]["source"]
+        client = IngestionClient(
+            primary=raw_fetcher,
+            primary_source=primary_source,
+            cache_dir=args.cache_dir,
+            emitter=emitter,
+            clock=time.monotonic,
+        )
         for month in months:
             for ch in channels:
                 try:
@@ -210,10 +180,7 @@ def _mock_raw_fetcher() -> RawFetcher:
     def fetch(tool: str, params: dict) -> dict:
         del tool
         return {
-            "Meta Data": {
-                "4. Interval": "15min",
-                "6. Time Zone": "US/Eastern",
-            },
+            "Meta Data": {"4. Interval": "15min", "6. Time Zone": "US/Eastern"},
             "Time Series (15min)": {
                 "2024-06-28 15:45:00": {
                     "1. open": "540.0",

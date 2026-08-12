@@ -16,7 +16,7 @@ Verdict logic per `technical-architecture-v4.md §4.1`:
 
 Failed-fetch policy (per v0.3 vocabulary + Sprint 023 correction):
 - On fetcher exception the probe emits `CHANNEL_FETCH_FAILED` with the
-  exception class + message. No `CHANNEL_PROBED` fires for that date —
+  exception class + message. No `CHANNEL_PROBED` fires for that date --
   no observation was made.
 - If at least one sample date succeeded, aggregates run over the
   successful subset and `CHANNEL_COVERAGE_ASSESSED` closes the channel.
@@ -26,13 +26,12 @@ Failed-fetch policy (per v0.3 vocabulary + Sprint 023 correction):
   `reason="all_fetches_failed"`, `earliest_timestamp=None`.
 """
 
-from __future__ import annotations
-
 import json
 from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 from price_space_llm.signals import StrictSignalEmitter
 
@@ -49,13 +48,15 @@ EARLIEST_HISTORY_REQUIRED = date(2015, 6, 15)
 MAX_ERROR_MESSAGE_CHARS = 1000
 
 
-class ChannelSpec(TypedDict):
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ChannelSpec:
     channel: str
     symbol: str
     source: str
 
 
-class FetchResult(TypedDict):
+@dataclass(slots=True, frozen=True, kw_only=True)
+class FetchResult:
     """What a fetcher returns per (channel, symbol, sample_date) call."""
 
     actual_frequency: str
@@ -70,7 +71,8 @@ class FetchResult(TypedDict):
 Fetcher = Callable[[str, str, str, date], FetchResult]
 
 
-class ChannelCoverage(TypedDict):
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ChannelCoverage:
     channel: str
     symbol: str
     source: str
@@ -87,10 +89,10 @@ def _verdict_for(
     """Return (verdict, reason) per tech-arch verdict rules over the successful subset."""
     if not per_date_results:
         return "dropped", "all_fetches_failed"
-    max_missing = max(r["missing_fraction"] for r in per_date_results)
+    max_missing = max(r.missing_fraction for r in per_date_results)
     if max_missing > MISSING_FRACTION_THRESHOLD:
         return "dropped", "missing_fraction_high"
-    earliest = min(r["earliest_timestamp"] for r in per_date_results)
+    earliest = min(r.earliest_timestamp for r in per_date_results)
     if _iso_date_str(earliest) > EARLIEST_HISTORY_REQUIRED:
         return "dropped", "history_too_short"
     return "accepted", None
@@ -113,17 +115,17 @@ def probe_channel(
     for sample_date in dates:
         try:
             result = fetcher(
-                channel_spec["channel"],
-                channel_spec["symbol"],
-                channel_spec["source"],
+                channel_spec.channel,
+                channel_spec.symbol,
+                channel_spec.source,
                 sample_date,
             )
         except Exception as exc:
             emitter.emit(
                 "CHANNEL_FETCH_FAILED",
-                channel=channel_spec["channel"],
-                symbol=channel_spec["symbol"],
-                source=channel_spec["source"],
+                channel=channel_spec.channel,
+                symbol=channel_spec.symbol,
+                source=channel_spec.source,
                 sample_date=sample_date.isoformat(),
                 exception_class=type(exc).__name__,
                 error_message=str(exc)[:MAX_ERROR_MESSAGE_CHARS],
@@ -132,26 +134,26 @@ def probe_channel(
         per_date.append(result)
         emitter.emit(
             "CHANNEL_PROBED",
-            channel=channel_spec["channel"],
-            symbol=channel_spec["symbol"],
-            source=channel_spec["source"],
+            channel=channel_spec.channel,
+            symbol=channel_spec.symbol,
+            source=channel_spec.source,
             sample_date=sample_date.isoformat(),
-            actual_frequency=result["actual_frequency"],
-            earliest_timestamp=result["earliest_timestamp"],
-            latest_timestamp=result["latest_timestamp"],
-            missing_fraction=result["missing_fraction"],
-            timezone=result["timezone"],
-            timestamp_semantics=result["timestamp_semantics"],
-            revision_behavior=result["revision_behavior"],
+            actual_frequency=result.actual_frequency,
+            earliest_timestamp=result.earliest_timestamp,
+            latest_timestamp=result.latest_timestamp,
+            missing_fraction=result.missing_fraction,
+            timezone=result.timezone,
+            timestamp_semantics=result.timestamp_semantics,
+            revision_behavior=result.revision_behavior,
         )
 
     verdict, reason = _verdict_for(per_date)
 
     if not per_date:
         return ChannelCoverage(
-            channel=channel_spec["channel"],
-            symbol=channel_spec["symbol"],
-            source=channel_spec["source"],
+            channel=channel_spec.channel,
+            symbol=channel_spec.symbol,
+            source=channel_spec.source,
             overall_missing_fraction=None,
             earliest_timestamp=None,
             latest_timestamp=None,
@@ -159,16 +161,16 @@ def probe_channel(
             reason=reason,
         )
 
-    max_missing = max(r["missing_fraction"] for r in per_date)
-    earliest = min(r["earliest_timestamp"] for r in per_date)
-    latest = max(r["latest_timestamp"] for r in per_date)
+    max_missing = max(r.missing_fraction for r in per_date)
+    earliest = min(r.earliest_timestamp for r in per_date)
+    latest = max(r.latest_timestamp for r in per_date)
 
     if verdict == "dropped" and reason is not None and reason != "all_fetches_failed":
         emitter.emit(
             "CHANNEL_REJECTED",
-            channel=channel_spec["channel"],
-            symbol=channel_spec["symbol"],
-            source=channel_spec["source"],
+            channel=channel_spec.channel,
+            symbol=channel_spec.symbol,
+            source=channel_spec.source,
             reason=reason,
             missing_fraction=max_missing,
             earliest_timestamp=earliest,
@@ -176,9 +178,9 @@ def probe_channel(
 
     emitter.emit(
         "CHANNEL_COVERAGE_ASSESSED",
-        channel=channel_spec["channel"],
-        symbol=channel_spec["symbol"],
-        source=channel_spec["source"],
+        channel=channel_spec.channel,
+        symbol=channel_spec.symbol,
+        source=channel_spec.source,
         overall_missing_fraction=max_missing,
         earliest_timestamp=earliest,
         latest_timestamp=latest,
@@ -186,9 +188,9 @@ def probe_channel(
     )
 
     return ChannelCoverage(
-        channel=channel_spec["channel"],
-        symbol=channel_spec["symbol"],
-        source=channel_spec["source"],
+        channel=channel_spec.channel,
+        symbol=channel_spec.symbol,
+        source=channel_spec.source,
         overall_missing_fraction=max_missing,
         earliest_timestamp=earliest,
         latest_timestamp=latest,
@@ -212,7 +214,7 @@ def run_phase_zero_probe(
 
     manifest: dict[str, Any] = {
         "generated_at": None,
-        "channels": {f"{c['channel']}__{c['symbol']}": dict(c) for c in coverages},
+        "channels": {f"{c.channel}__{c.symbol}": asdict(c) for c in coverages},
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

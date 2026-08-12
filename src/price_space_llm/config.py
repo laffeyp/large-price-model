@@ -11,25 +11,16 @@ enum sets; the Literal types below mirror those enum values so the
 Pydantic validator rejects any out-of-set value at parse time.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
 from price_space_llm.signals import StrictSignalEmitter
-
-
-class ConfigResolutionResult(TypedDict):
-    """Return type of `load_config`."""
-
-    config: ExperimentConfig
-    config_hash: str
-    resolved_at: datetime
 
 
 class ExperimentConfig(BaseModel):
@@ -55,6 +46,15 @@ class ExperimentConfig(BaseModel):
 
 class ConfigValidationFailed(RuntimeError):
     """Config file exists but does not satisfy the ExperimentConfig schema."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ConfigResolutionResult:
+    """Return type of `load_config`."""
+
+    config: ExperimentConfig
+    config_hash: str
+    resolved_at: datetime
 
 
 def _config_hash(config_bytes: bytes) -> str:

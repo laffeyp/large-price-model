@@ -10,16 +10,13 @@ a short stderr summary, exits 0 on all-accepted and 2 on any-dropped.
 --fetcher alphavantage: live Alpha-Vantage over HTTP; needs
     ALPHAVANTAGE_API_KEY env var. Fetcher exceptions are caught inside
     `probe_channel` and surface as v0.3's `CHANNEL_FETCH_FAILED` incident
-    signals — no fabricated observations, no fill values.
+    signals -- no fabricated observations, no fill values.
 """
-
-from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import traceback
 from datetime import date
@@ -33,11 +30,7 @@ from price_space_llm.ingestion.probe import (
     FetchResult,
     run_phase_zero_probe,
 )
-from price_space_llm.signals import (
-    StrictSignalEmitter,
-    load_vocabulary,
-    process_session,
-)
+from price_space_llm.script_harness import script_session
 
 
 def mock_fetcher(channel: str, symbol: str, source: str, sample_date: date) -> FetchResult:
@@ -53,18 +46,6 @@ def mock_fetcher(channel: str, symbol: str, source: str, sample_date: date) -> F
         timestamp_semantics="bar_close",
         revision_behavior="immutable",
     )
-
-
-def _git_sha() -> str:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return out.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "0" * 40
 
 
 def _load_config(config_path: Path) -> list[ChannelSpec]:
@@ -96,11 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=Path("data/manifests/channel_coverage.json"),
     )
-    parser.add_argument(
-        "--fetcher",
-        choices=("mock", "alphavantage"),
-        default="mock",
-    )
+    parser.add_argument("--fetcher", choices=("mock", "alphavantage"), default="mock")
     args = parser.parse_args(argv)
 
     if not args.config.exists():
@@ -115,23 +92,18 @@ def main(argv: list[str] | None = None) -> int:
 
     channels = _load_config(args.config)
     config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
-    git_sha = _git_sha()
     data_hash = hashlib.sha256(b"probe:no-data-input").hexdigest()
-
     run_id = f"probe-{args.fetcher}-{args.seed:016d}"
-    sink_path = args.logs_dir / run_id / "signals.jsonl"
-    emitter = StrictSignalEmitter(load_vocabulary(), jsonl_sink=sink_path)
 
-    exit_code = 0
-    with process_session(
+    coverages = []
+    with script_session(
         run_kind="probe",
+        run_id=run_id,
         config_hash=config_hash,
-        git_sha=git_sha,
         data_hash=data_hash,
         seed=args.seed,
-        run_id=run_id,
-        emitter=emitter,
-    ):
+        logs_dir=args.logs_dir,
+    ) as (emitter, sink_path):
         try:
             coverages = run_phase_zero_probe(
                 channels,
@@ -144,10 +116,9 @@ def main(argv: list[str] | None = None) -> int:
             traceback.print_exc(file=sys.stderr)
             return 1
 
-    n_accepted = sum(1 for c in coverages if c["verdict"] == "accepted")
-    n_dropped = sum(1 for c in coverages if c["verdict"] == "dropped")
-    if n_dropped > 0:
-        exit_code = 2
+    n_accepted = sum(1 for c in coverages if c.verdict == "accepted")
+    n_dropped = sum(1 for c in coverages if c.verdict == "dropped")
+    exit_code = 2 if n_dropped > 0 else 0
     print(
         f"probe: {n_accepted} accepted, {n_dropped} dropped; "
         f"manifest={args.manifest}; trace={sink_path}",

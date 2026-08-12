@@ -98,7 +98,7 @@ def test_load_config_emits_config_resolved(tmp_path: Path):
     assert resolved.payload["context_len"] == "128"  # emitted as string per vocab enum
     assert resolved.payload["n_buckets"] == "32"
     assert len(resolved.payload["config_hash"]) == 64  # sha256 hex
-    assert result["config"].n_buckets == 32
+    assert result.config.n_buckets == 32
 
 
 def test_load_config_missing_file_emits_validation_failed_and_raises(tmp_path: Path):
@@ -136,4 +136,4 @@ def test_load_config_hash_is_deterministic(tmp_path: Path):
     path = _write(tmp_path, _valid_body())
     r1 = load_config(path, emitter=e, run_id="a", git_sha="0" * 40)
     r2 = load_config(path, emitter=e, run_id="b", git_sha="0" * 40)
-    assert r1["config_hash"] == r2["config_hash"]
+    assert r1.config_hash == r2.config_hash

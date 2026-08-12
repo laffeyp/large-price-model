@@ -15,13 +15,11 @@ tech-arch §7. No fill values — the vocabulary refuses lies (Sprint 023
 retraction).
 """
 
-from __future__ import annotations
-
 import math
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict
 
 import polars as pl
 
@@ -40,7 +38,8 @@ FEATURE_SPECS: tuple[str, ...] = (
 )
 
 
-class FeatureResult(TypedDict):
+@dataclass(slots=True, frozen=True, kw_only=True)
+class FeatureResult:
     run_id: str
     total_rows: int
     n_features_emitted: int

@@ -18,12 +18,11 @@ The probe checks whether a channel is usable; the client fetches the
 actual rows. Different callers, different signatures.
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 from price_space_llm.ingestion import cache as _cache
 from price_space_llm.ingestion.ratelimit import (
@@ -35,7 +34,8 @@ from price_space_llm.signals import StrictSignalEmitter
 RawFetcher = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 
-class ObservationMetadata(TypedDict):
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ObservationMetadata:
     """What the caller extracts from a vendor response to populate RAW_OBSERVATION_WRITTEN.
 
     value_time: the primary observation time (batch high-watermark for multi-row responses).
@@ -160,10 +160,10 @@ class IngestionClient:
             source=source_used,
             channel=channel,
             symbol=symbol,
-            value_time=meta["value_time"].isoformat(),
-            released_at=meta["known_at"].isoformat(),
-            known_at=meta["known_at"].isoformat(),
-            rows_written=meta["rows_written"],
+            value_time=meta.value_time.isoformat(),
+            released_at=meta.known_at.isoformat(),
+            known_at=meta.known_at.isoformat(),
+            rows_written=meta.rows_written,
             revision_id=new_hash_int,
         )
 
@@ -173,7 +173,7 @@ class IngestionClient:
                 source=source_used,
                 channel=channel,
                 symbol=symbol,
-                value_time=meta["value_time"].isoformat(),
+                value_time=meta.value_time.isoformat(),
                 prior_revision_id=prior_hash_int,
                 new_revision_id=new_hash_int,
             )

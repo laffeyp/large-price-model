@@ -1,6 +1,7 @@
 """Tests for the Phase 0 channel-coverage probe."""
 
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -39,9 +40,7 @@ def _short_history_result() -> FetchResult:
 
 
 def _high_missing_result() -> FetchResult:
-    r = _clean_result()
-    r["missing_fraction"] = 0.20
-    return r
+    return replace(_clean_result(), missing_fraction=0.20)
 
 
 def _fresh_emitter() -> StrictSignalEmitter:
@@ -66,8 +65,8 @@ def test_probe_channel_accepts_clean_channel():
     e = _fresh_emitter()
     fetcher = lambda *args: _clean_result()  # noqa: E731
     coverage = probe_channel(_spec(), DEFAULT_SAMPLE_DATES, fetcher, e)
-    assert coverage["verdict"] == "accepted"
-    assert coverage["reason"] is None
+    assert coverage.verdict == "accepted"
+    assert coverage.reason is None
     last = e.snapshot()[-1]
     assert last.tag == "CHANNEL_COVERAGE_ASSESSED"
     assert last.payload["verdict"] == "accepted"
@@ -77,8 +76,8 @@ def test_probe_channel_rejects_high_missing_fraction():
     e = _fresh_emitter()
     fetcher = lambda *args: _high_missing_result()  # noqa: E731
     coverage = probe_channel(_spec(), DEFAULT_SAMPLE_DATES, fetcher, e)
-    assert coverage["verdict"] == "dropped"
-    assert coverage["reason"] == "missing_fraction_high"
+    assert coverage.verdict == "dropped"
+    assert coverage.reason == "missing_fraction_high"
     tags = [s.tag for s in e.snapshot()]
     assert tags.count("CHANNEL_REJECTED") == 1
     reject = next(s for s in e.snapshot() if s.tag == "CHANNEL_REJECTED")
@@ -89,8 +88,8 @@ def test_probe_channel_rejects_history_too_short():
     e = _fresh_emitter()
     fetcher = lambda *args: _short_history_result()  # noqa: E731
     coverage = probe_channel(_spec(), DEFAULT_SAMPLE_DATES, fetcher, e)
-    assert coverage["verdict"] == "dropped"
-    assert coverage["reason"] == "history_too_short"
+    assert coverage.verdict == "dropped"
+    assert coverage.reason == "history_too_short"
 
 
 def test_probe_channel_emits_channel_fetch_failed_on_exception():
@@ -112,7 +111,7 @@ def test_probe_channel_emits_channel_fetch_failed_on_exception():
     assert failed.payload["exception_class"] == "RuntimeError"
     assert failed.payload["error_message"] == "vendor said no"
     assert failed.payload["sample_date"] == fail_on.isoformat()
-    assert coverage["verdict"] == "accepted"
+    assert coverage.verdict == "accepted"
 
 
 def test_probe_channel_all_fetches_failed_skips_coverage_assessed():
@@ -128,10 +127,10 @@ def test_probe_channel_all_fetches_failed_skips_coverage_assessed():
     assert tags.count("CHANNEL_PROBED") == 0
     assert tags.count("CHANNEL_COVERAGE_ASSESSED") == 0
     assert tags.count("CHANNEL_REJECTED") == 0
-    assert coverage["verdict"] == "dropped"
-    assert coverage["reason"] == "all_fetches_failed"
-    assert coverage["earliest_timestamp"] is None
-    assert coverage["overall_missing_fraction"] is None
+    assert coverage.verdict == "dropped"
+    assert coverage.reason == "all_fetches_failed"
+    assert coverage.earliest_timestamp is None
+    assert coverage.overall_missing_fraction is None
 
 
 def test_probe_channel_truncates_long_error_message():

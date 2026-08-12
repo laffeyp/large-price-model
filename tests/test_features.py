@@ -123,8 +123,8 @@ def test_run_feature_pipeline_writes_parquet(tmp_path: Path):
     assert output_path.exists()
     df = pl.read_parquet(output_path)
     assert df.height == 25
-    assert result["n_failures"] > 0  # rolling windows produce failures on early rows
-    assert result["n_features_emitted"] > 0
+    assert result.n_failures > 0  # rolling windows produce failures on early rows
+    assert result.n_features_emitted > 0
 
 
 def test_two_channels_produce_eight_feature_columns():

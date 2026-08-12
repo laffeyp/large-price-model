@@ -54,4 +54,9 @@ module = "sdd"
 ignore_missing_imports = true
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "hypothesis>=6.165.3",
+]
