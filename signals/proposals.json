@@ -66,6 +66,26 @@
       "outcome": "accepted",
       "outcome_date": "2026-08-10",
       "stamped_by": "Architect (Peter Laffey), 'go' after two-paths analysis 2026-08-10"
+    },
+    {
+      "id": "P-017",
+      "kind": "NEW_TAG_PROPOSED",
+      "status": "accepted",
+      "opened_at": "2026-08-11",
+      "closed_at": "2026-08-11",
+      "target": "vocabulary v0.3",
+      "summary": "Add CHANNEL_FETCH_FAILED (probe/incident) so probe can record fetcher exceptions honestly instead of fabricating CHANNEL_PROBED payloads.",
+      "rationale": "Sprint 020 shipped a fill-value shim on fetcher exceptions. Architect flagged 2026-08-11 as a code failure. Path (b) chosen: new incident tag with exception_class + error_message; distinct from CHANNEL_REJECTED which covers 'got data, not enough'.",
+      "source": "sprints/sprint-020-wire-alphavantage-into-probe-cli.md live smoke; BLACKBOARD 2026-08-11 halt entry; Architect ratification 2026-08-11 'yeah, then we update the vocab if need be, then continue'.",
+      "payload_shape": {
+        "channel": "entity_ref<Channel> required",
+        "symbol": "entity_ref<Symbol> required",
+        "source": "entity_ref<Source> required",
+        "sample_date": "date_iso required",
+        "exception_class": "str required",
+        "error_message": "str required (capped 1000 chars at emit site)"
+      },
+      "evidence_constraint_added": "diagnostic_required on error_message (non-empty)"
     }
   ],
   "_recast_log": {

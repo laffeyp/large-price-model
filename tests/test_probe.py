@@ -93,6 +93,60 @@ def test_probe_channel_rejects_history_too_short():
     assert coverage["reason"] == "history_too_short"
 
 
+def test_probe_channel_emits_channel_fetch_failed_on_exception():
+    """One failed date → CHANNEL_FETCH_FAILED; other dates still emit CHANNEL_PROBED."""
+    e = _fresh_emitter()
+    fail_on = date(2018, 6, 15)
+
+    def fetcher(channel: str, symbol: str, source: str, sample_date: date) -> FetchResult:
+        if sample_date == fail_on:
+            raise RuntimeError("vendor said no")
+        return _clean_result()
+
+    coverage = probe_channel(_spec(), DEFAULT_SAMPLE_DATES, fetcher, e)
+    tags = [s.tag for s in e.snapshot()]
+    assert tags.count("CHANNEL_PROBED") == 4
+    assert tags.count("CHANNEL_FETCH_FAILED") == 1
+    assert tags.count("CHANNEL_COVERAGE_ASSESSED") == 1
+    failed = next(s for s in e.snapshot() if s.tag == "CHANNEL_FETCH_FAILED")
+    assert failed.payload["exception_class"] == "RuntimeError"
+    assert failed.payload["error_message"] == "vendor said no"
+    assert failed.payload["sample_date"] == fail_on.isoformat()
+    assert coverage["verdict"] == "accepted"
+
+
+def test_probe_channel_all_fetches_failed_skips_coverage_assessed():
+    """All fetches fail → no CHANNEL_COVERAGE_ASSESSED fires; no earliest_timestamp exists."""
+    e = _fresh_emitter()
+
+    def fetcher(channel: str, symbol: str, source: str, sample_date: date) -> FetchResult:
+        raise RuntimeError("total failure")
+
+    coverage = probe_channel(_spec(), DEFAULT_SAMPLE_DATES, fetcher, e)
+    tags = [s.tag for s in e.snapshot()]
+    assert tags.count("CHANNEL_FETCH_FAILED") == 5
+    assert tags.count("CHANNEL_PROBED") == 0
+    assert tags.count("CHANNEL_COVERAGE_ASSESSED") == 0
+    assert tags.count("CHANNEL_REJECTED") == 0
+    assert coverage["verdict"] == "dropped"
+    assert coverage["reason"] == "all_fetches_failed"
+    assert coverage["earliest_timestamp"] is None
+    assert coverage["overall_missing_fraction"] is None
+
+
+def test_probe_channel_truncates_long_error_message():
+    """error_message is capped so a malicious/verbose vendor can't flood the trace."""
+    e = _fresh_emitter()
+    huge = "x" * 5000
+
+    def fetcher(channel: str, symbol: str, source: str, sample_date: date) -> FetchResult:
+        raise RuntimeError(huge)
+
+    probe_channel(_spec(), DEFAULT_SAMPLE_DATES, fetcher, e)
+    failed = next(s for s in e.snapshot() if s.tag == "CHANNEL_FETCH_FAILED")
+    assert len(failed.payload["error_message"]) == 1000
+
+
 def test_run_phase_zero_probe_writes_manifest_json(tmp_path: Path):
     e = _fresh_emitter()
 

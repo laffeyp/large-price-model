@@ -293,7 +293,7 @@ class StrictSignalVocabulary(SignalVocabulary):  # type: ignore[misc]
                 raise ValueError(f"Signal '{tag}' field '{field_name}': {e}") from e
 
 
-def load_vocabulary(name: str = "0.2.json") -> StrictSignalVocabulary:
+def load_vocabulary(name: str = "0.3.json") -> StrictSignalVocabulary:
     """Read the packaged vocabulary and return a StrictSignalVocabulary bound to its tags."""
     text = files("price_space_llm._vocab").joinpath(name).read_text(encoding="utf-8")
     doc = json.loads(text)

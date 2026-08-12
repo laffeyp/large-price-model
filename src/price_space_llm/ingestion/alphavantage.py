@@ -76,7 +76,13 @@ def _extract_fetch_result(
     response_json: dict[str, Any],
     sample_date: date,
 ) -> FetchResult:
-    """Turn a TIME_SERIES_INTRADAY response into a FetchResult."""
+    """Turn a TIME_SERIES_INTRADAY response into a FetchResult.
+
+    Raises `AlphaVantageResponseError` if the Time Series is empty; the
+    caller has no observation to serialise. Sprint 023 removed the
+    fill-value path that Sprint 019 shipped.
+    """
+    del sample_date  # reserved for future per-date filtering
     meta = response_json.get("Meta Data", {})
     series_key = next(
         (k for k in response_json if k.startswith("Time Series")),
@@ -85,14 +91,8 @@ def _extract_fetch_result(
     series: dict[str, dict[str, str]] = response_json.get(series_key, {})
 
     if not series:
-        return FetchResult(
-            actual_frequency=meta.get("4. Interval", "15min"),
-            earliest_timestamp="1970-01-01T00:00:00+00:00",
-            latest_timestamp="1970-01-01T00:00:00+00:00",
-            missing_fraction=1.0,
-            timezone="UTC",
-            timestamp_semantics="bar_close",
-            revision_behavior="empty_series",
+        raise AlphaVantageResponseError(
+            "empty Time Series in vendor response — no observations to serialise"
         )
 
     ts_us = sorted(series.keys())

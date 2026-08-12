@@ -8,8 +8,9 @@ a short stderr summary, exits 0 on all-accepted and 2 on any-dropped.
 
 --fetcher mock (default): deterministic mock; USO drops.
 --fetcher alphavantage: live Alpha-Vantage over HTTP; needs
-    ALPHAVANTAGE_API_KEY env var. Fetcher errors surface via
-    CHANNEL_REJECTED, not uncaught exceptions.
+    ALPHAVANTAGE_API_KEY env var. Fetcher exceptions are caught inside
+    `probe_channel` and surface as v0.3's `CHANNEL_FETCH_FAILED` incident
+    signals — no fabricated observations, no fill values.
 """
 
 from __future__ import annotations
@@ -24,12 +25,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-import httpx
-
-from price_space_llm.ingestion.alphavantage import (
-    AlphaVantageError,
-    make_alphavantage_fetcher,
-)
+from price_space_llm.ingestion.alphavantage import make_alphavantage_fetcher
 from price_space_llm.ingestion.probe import (
     DEFAULT_SAMPLE_DATES,
     ChannelSpec,
@@ -59,41 +55,6 @@ def mock_fetcher(channel: str, symbol: str, source: str, sample_date: date) -> F
     )
 
 
-def _error_shim(inner: Fetcher) -> Fetcher:
-    """Wrap `inner` so exceptions become a fully-missing FetchResult.
-
-    The probe reads `missing_fraction > 0.05` as a `dropped` verdict, so
-    setting `missing_fraction=1.0` is enough to route the channel to
-    CHANNEL_REJECTED with reason `missing_fraction_high`. Every other
-    field on the returned FetchResult must satisfy the v0.2 vocabulary's
-    strict enums — the failure *reason* has nowhere to live in the
-    current CHANNEL_PROBED schema, so it goes to stderr only. A later
-    sprint adds either a CHANNEL_FETCH_FAILED tag or extends
-    `revision_behavior` to include an `error` value.
-    """
-
-    def wrapped(channel: str, symbol: str, source: str, sample_date: date) -> FetchResult:
-        try:
-            return inner(channel, symbol, source, sample_date)
-        except (AlphaVantageError, NotImplementedError, httpx.HTTPError) as e:
-            print(
-                f"probe: fetcher error on {channel}/{symbol}@{sample_date}: "
-                f"{type(e).__name__}: {e}",
-                file=sys.stderr,
-            )
-            return FetchResult(
-                actual_frequency="15min",
-                earliest_timestamp="1970-01-01T00:00:00+00:00",
-                latest_timestamp="1970-01-01T00:00:00+00:00",
-                missing_fraction=1.0,
-                timezone="UTC",
-                timestamp_semantics="bar_close",
-                revision_behavior="immutable",
-            )
-
-    return wrapped
-
-
 def _git_sha() -> str:
     try:
         out = subprocess.check_output(
@@ -121,7 +82,7 @@ def _resolve_fetcher(kind: str) -> Fetcher:
                 "probe: --fetcher alphavantage requires ALPHAVANTAGE_API_KEY env var "
                 "(copy .env.example to .env and fill in the key)."
             )
-        return _error_shim(make_alphavantage_fetcher(key))
+        return make_alphavantage_fetcher(key)
     raise ValueError(f"unknown fetcher kind: {kind!r}")
 
 

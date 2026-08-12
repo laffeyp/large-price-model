@@ -162,7 +162,15 @@ def test_fetcher_sends_expected_query_params():
     assert "apikey=test-key-abc" in url
 
 
-def test_fetcher_marks_empty_series_as_fully_missing():
+def test_fetcher_raises_on_empty_series():
+    """Empty Time Series means no observations; the fetcher raises rather than fabricate.
+
+    Sprint 023 correction: the earlier fill-value path (epoch-zero timestamps +
+    `revision_behavior="empty_series"`) shipped a lie in the trace. The caller
+    (probe) now catches the raise and emits `CHANNEL_FETCH_FAILED` — an
+    incident tag whose payload is honest about the failure.
+    """
+
     def handler(request):
         return httpx.Response(
             200,
@@ -173,11 +181,8 @@ def test_fetcher_marks_empty_series_as_fully_missing():
         )
 
     fetcher = make_alphavantage_fetcher("k", client=_client_with(handler))
-    result = fetcher("target", "SPY", "mcp_av", date(2015, 6, 15))
-    assert result["missing_fraction"] == 1.0
-    # Vocabulary requires ISO-8601 datetime_utc; epoch-zero marks "no data".
-    assert result["earliest_timestamp"] == "1970-01-01T00:00:00+00:00"
-    assert result["revision_behavior"] == "empty_series"
+    with pytest.raises(AlphaVantageResponseError, match="empty Time Series"):
+        fetcher("target", "SPY", "mcp_av", date(2015, 6, 15))
 
 
 def test_alphavantage_error_hierarchy():

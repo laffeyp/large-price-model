@@ -56,7 +56,7 @@ VALID_CHECKPOINT_WRITTEN_PAYLOAD = {
 def test_locked_vocabulary_loads_all_tags():
     vocab = load_vocabulary()
     raw = json.loads(
-        files("price_space_llm._vocab").joinpath("0.2.json").read_text(encoding="utf-8")
+        files("price_space_llm._vocab").joinpath("0.3.json").read_text(encoding="utf-8")
     )
     assert len(vocab.tags()) == len(raw["tags"])
 

@@ -35,7 +35,7 @@ def _make_emitter(tmp_path: Path) -> tuple[StrictSignalEmitter, Path]:
         "SESSION_INIT",
         run_id="test-run",
         run_kind="probe",
-        vocab_version="0.2",
+        vocab_version="0.3",
         config_hash="0" * 64,
         git_sha="0" * 40,
         data_hash="0" * 64,
