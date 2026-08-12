@@ -62,9 +62,19 @@ Type additions land here as they stabilize; renames land here as deprecation row
 
 ---
 
+## Cost neutrality
+
+The Architect wires only tools whose cost is already accepted. **The Agent must never treat API cost, tier price, request-per-day budget, or paid-vs-free entitlement as a constraint on design.** Recommendations, sprint scopes, and endpoint selections are evaluated on correctness, honesty against the vocabulary, and match to tech-arch intent — never on "cheapest," "free tier," or "budget-sparing." Pre-optimising for cost produces weaker calibrations, avoided endpoints, and lowered signal fidelity. The Architect handles cost outside this loop.
+
+Ratified 2026-08-12 after the Sprint 034 cost-calibration retraction, where the Agent first invented a "free tier" constraint that did not exist and second recommended the "cheapest" combination when the account had full endpoint access. Every recommendation from this point uses the richest data path the endpoints support.
+
+---
+
 ## External SDK bridge mappings
 
 Per AGENTS.md hard rule 10 (halt with `bridge_mapping_required` if a sprint imports an SDK whose bridge mapping is not on file). Empty at project start; populated as each SDK is first used.
+
+**Discipline (ratified 2026-08-12 per BLACKBOARD Decisions).** The halt fires when the SDK's actual surface is expected to diverge from priors: network APIs whose response shape is not pinned in a public spec, agent-only tool namespaces, or SDKs previously observed to diverge from their documentation. Standard PyPI packages with published stable APIs (httpx, polars, pyarrow, pydantic, torch, numpy, hypothesis, and future adoptions of similar class) adopt via a dep pin plus a one-line note in the sprint card's `notes` section; no halt required. Sprint card entries record: package name, version pin, one-line reason. Any surprise at first use (unexpected signature, missing feature, behavior contradicting docs) escalates that adoption to a halt at that point.
 
 ### PyTorch 2.4+
 

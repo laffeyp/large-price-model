@@ -238,12 +238,71 @@ def alphavantage_extract_metadata(response: dict[str, Any]) -> ObservationMetada
     )
 
 
+def alphavantage_options_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
+    """Extract ObservationMetadata from a HISTORICAL_OPTIONS response.
+
+    `value_time`: the `date` field from the first row (US/Eastern date at 20:00
+    -> converted to UTC via the fixed EST offset). `known_at`: same day at
+    22:00 UTC (an approximation of end-of-day options-chain publication).
+    `rows_written`: `len(response['data'])` — the number of contracts on
+    the chain.
+    """
+    if response.get("message") != "success":
+        raise AlphaVantageResponseError(
+            f"options response not marked success: {response.get('message')!r}"
+        )
+    data = response.get("data")
+    if not isinstance(data, list) or not data:
+        raise AlphaVantageResponseError("options response has no non-empty 'data' list")
+    date_str = data[0].get("date")
+    if not date_str:
+        raise AlphaVantageResponseError("options row missing 'date' field")
+    naive_close = datetime.strptime(f"{date_str} 20:00:00", "%Y-%m-%d %H:%M:%S")
+    value_time = naive_close.replace(tzinfo=timezone(US_EASTERN_OFFSET)).astimezone(UTC)
+    known_at = value_time + timedelta(hours=2)
+    return ObservationMetadata(
+        value_time=value_time,
+        known_at=known_at,
+        rows_written=len(data),
+    )
+
+
+def alphavantage_bbo_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
+    """Extract ObservationMetadata from a REALTIME_BULK_BID_ASK_PRICES response.
+
+    `value_time`: the `timestamp` field from the first row (parsed as UTC).
+    `known_at`: same instant (a live BBO snapshot has zero publication delay).
+    `rows_written`: `len(response['data'])` — the number of symbols in the batch.
+    """
+    if response.get("message") != "success":
+        raise AlphaVantageResponseError(
+            f"BBO response not marked success: {response.get('message')!r}"
+        )
+    data = response.get("data")
+    if not isinstance(data, list) or not data:
+        raise AlphaVantageResponseError("BBO response has no non-empty 'data' list")
+    ts_str = data[0].get("timestamp")
+    if not ts_str:
+        raise AlphaVantageResponseError("BBO row missing 'timestamp' field")
+    # Timestamps like "2026-08-12 18:40:26.980"; treat as UTC.
+    ts_clean = ts_str.split(".")[0]
+    naive = datetime.strptime(ts_clean, "%Y-%m-%d %H:%M:%S")
+    value_time = naive.replace(tzinfo=UTC)
+    return ObservationMetadata(
+        value_time=value_time,
+        known_at=value_time,
+        rows_written=len(data),
+    )
+
+
 __all__ = [
     "EXPECTED_BARS_PER_TRADING_MONTH",
     "AlphaVantageError",
     "AlphaVantageRateLimitError",
     "AlphaVantageResponseError",
+    "alphavantage_bbo_extract_metadata",
     "alphavantage_extract_metadata",
+    "alphavantage_options_extract_metadata",
     "make_alphavantage_fetcher",
     "make_alphavantage_raw_fetcher",
 ]
