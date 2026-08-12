@@ -1,6 +1,6 @@
 {
   "target_symbol": "SPY",
-  "context_len": 128,
+  "context_len": 64,
   "n_buckets": 32,
   "lambda_risk": 1.0,
   "alpha_mag_weight": 0.5

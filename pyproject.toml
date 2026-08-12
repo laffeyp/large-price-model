@@ -1,13 +1,15 @@
 [project]
 name = "price-space-llm"
-version = "0.14.0"
+version = "0.15.0"
 description = "Causal decoder transformer over multi-channel 15-min market state; 32-bucket vol-normalized forward return distribution; cost-aware simulator."
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+    "numpy>=2.4.6",
     "polars>=1.43.2",
     "pyarrow>=25.0.1",
     "pydantic>=2",
+    "torch>=2.13.0",
 ]
 
 [build-system]
@@ -45,13 +47,23 @@ ignore = ["ANN401"]
 "tests/*" = ["ANN"]
 
 [tool.mypy]
-python_version = "3.11"
+# Bumped from 3.11 in Sprint 031 -- numpy's stubs use PEP 695 `type` statements
+# that require python_version >= 3.12, and torch pulls numpy in transitively.
+# Our floor stays >=3.11 for the runtime; mypy just needs the modern parser.
+python_version = "3.12"
 strict = true
 files = ["src/price_space_llm"]
 
 [[tool.mypy.overrides]]
 module = "sdd"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# numpy stubs use PEP 695 `type` statements that require mypy python_version >= 3.12.
+# We import numpy only transitively via torch; skip its type surface.
+module = "numpy.*"
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [dependency-groups]
 dev = [
