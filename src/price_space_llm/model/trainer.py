@@ -27,6 +27,7 @@ from torch.nn import functional as F
 from price_space_llm.model.dataset import WindowBatch, WindowSampler, split_tokens
 from price_space_llm.model.transformer import PriceSpaceLLM, TransformerConfig
 from price_space_llm.signals import StrictSignalEmitter
+from price_space_llm.wandb_sink import WandbSink
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -117,8 +118,15 @@ def run_training(
     emitter: StrictSignalEmitter,
     run_id: str,
     checkpoint_dir: Path,
+    wandb_sink: WandbSink | None = None,
 ) -> TrainerResult:
-    """Fit model on `tokens`; emit every declared training tag; write checkpoints."""
+    """Fit model on `tokens`; emit every declared training tag; write checkpoints.
+
+    `wandb_sink` is optional. When provided, per-step scalars stream to W&B via
+    `sink.log_step(step, {...})` and each checkpoint via `sink.log_checkpoint`.
+    W&B failures do not stop training — they emit `WANDB_UPLOAD_FAILED` and
+    training continues against the local SDD trace.
+    """
     train_tokens, val_tokens = split_tokens(tokens, trainer_cfg.train_frac)
     generator = torch.Generator()
     generator.manual_seed(trainer_cfg.seed)
@@ -207,6 +215,16 @@ def run_training(
             grad_norm=grad_norm,
             throughput_tokens_per_sec=throughput,
         )
+        if wandb_sink is not None:
+            wandb_sink.log_step(
+                step,
+                {
+                    "train_loss": train_loss,
+                    "lr": float(trainer_cfg.lr),
+                    "grad_norm": grad_norm,
+                    "throughput_tokens_per_sec": throughput,
+                },
+            )
 
         total_train_loss += train_loss
         n_steps_done += 1
@@ -248,6 +266,8 @@ def run_training(
                 val_top1=metrics["val_top1"],
                 val_top3=metrics["val_top3"],
             )
+            if wandb_sink is not None:
+                wandb_sink.log_checkpoint(step, ckpt_path, dict(metrics))
             n_checkpoints += 1
 
     emitter.emit(

@@ -172,7 +172,14 @@ Normalisation the fetcher owns:
 
 ### Weights & Biases
 
-- Project `price-space-llm`. Logs config, git SHA, data hash. To fill: the exact `wandb.init(...)` shape and the `wandb.log()` cadence once the first training run lands.
+- Dep pin: `wandb>=0.18` (Sprint 040 landed with 0.28.2). Path (b) adoption per bridge-mapping discipline — stable public API, dep pin + notes on the sprint card, no halt required.
+- Actual surface used, as of 0.28.2:
+  - `wandb.init(project: str, name: str, config: dict, mode: "online"|"offline"|"disabled", dir: str) -> wandb.sdk.wandb_run.Run`. Returns a Run with `.id`, `.dir` (a `files/` subdir under `dir/wandb/offline-run-{timestamp}-{id}/`).
+  - `wandb.log(data: dict[str, float|int], step: int)` streams scalars.
+  - `wandb.finish()` flushes summary and closes the run.
+  - `wandb.errors.{Error, CommError, AuthenticationError, UsageError}` — every exception the trainer catches wraps into a `WANDB_UPLOAD_FAILED` emit.
+- Project name: `price-space-llm`. Run name: the trainer's `run_id`. Config: model + trainer config as a flat dict. `mode` selection: `WANDB_MODE=offline` for local smoke (no credential, writes to `wandb/` on disk); `WANDB_MODE=online` for real runs on rented GPU (needs `WANDB_API_KEY`).
+- `wandb.log` cadence: per training step (train_loss, lr, grad_norm) + per checkpoint (val_nll, val_ece, val_brier, val_rps, val_dir_acc, val_top1, val_top3). Matches the fields on `TRAINING_STEP_COMPLETED` and `CHECKPOINT_WRITTEN`.
 
 Every bridge mapping above is a stub. First sprint that imports the SDK halts with `bridge_mapping_required` if the actual surface is not documented here at that time. That halt is a feature — it forces us to read the SDK before writing against it, per soundfield's round 13/20-26 origin (Addendum C, external-SDK reverse-engineer-first).
 
