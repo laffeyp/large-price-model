@@ -210,9 +210,7 @@ def fit_spread_scaler(
         # All y identical; can't do OLS regression, but can do ratio-of-means.
         if x_mean == 0:
             return SpreadScalerFit(slope=0.0, intercept=y_mean, r_squared=0.0, n_pairs=n)
-        return SpreadScalerFit(
-            slope=y_mean / x_mean, intercept=0.0, r_squared=0.0, n_pairs=n
-        )
+        return SpreadScalerFit(slope=y_mean / x_mean, intercept=0.0, r_squared=0.0, n_pairs=n)
     if xx_var == 0:
         # All x identical; return the mean-y as intercept with slope=0.
         return SpreadScalerFit(slope=0.0, intercept=y_mean, r_squared=0.0, n_pairs=n)

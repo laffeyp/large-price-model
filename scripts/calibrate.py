@@ -31,9 +31,7 @@ from price_space_llm.script_harness import script_session
 CACHE_SOURCE = "mcp_av"
 
 
-def _pull_options_month(
-    client: IngestionClient, cache_dir: Path, symbol: str, month: date
-) -> Path:
+def _pull_options_month(client: IngestionClient, cache_dir: Path, symbol: str, month: date) -> Path:
     """Pull HISTORICAL_OPTIONS for `symbol` at a given month-anchor date; return cache path."""
     params = {"symbol": symbol, "date": month.isoformat(), "datatype": "json"}
     client.call(
@@ -47,9 +45,7 @@ def _pull_options_month(
     return _cache.cache_path(cache_dir, CACHE_SOURCE, "HISTORICAL_OPTIONS", key)
 
 
-def _pull_bbo_snapshot(
-    client: IngestionClient, cache_dir: Path, symbol: str, tag: str
-) -> Path:
+def _pull_bbo_snapshot(client: IngestionClient, cache_dir: Path, symbol: str, tag: str) -> Path:
     """Poll REALTIME_BULK_BID_ASK_PRICES; store under a tag-suffixed cache key."""
     params = {
         "symbol": symbol,
@@ -170,9 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         for i in range(args.bbo_snapshots):
             if i > 0:
                 _time.sleep(args.bbo_interval_seconds)
-            bbo_paths.append(
-                _pull_bbo_snapshot(client, args.cache_dir, symbol, tag=f"snap{i:03d}")
-            )
+            bbo_paths.append(_pull_bbo_snapshot(client, args.cache_dir, symbol, tag=f"snap{i:03d}"))
 
         intraday_paths = _list_intraday_cache(args.cache_dir, symbol)
         if not intraday_paths:

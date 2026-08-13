@@ -81,6 +81,8 @@ class IngestionClient:
         fallback: RawFetcher | None = None,
         fallback_source: str | None = None,
         rate_limit_per_minute: int = 75,
+        run_id: str = "unknown",
+        git_sha: str = "0" * 40,
     ) -> None:
         if (fallback is None) != (fallback_source is None):
             raise ValueError("fallback and fallback_source must both be set or both None")
@@ -90,6 +92,8 @@ class IngestionClient:
         self._fallback_source = fallback_source
         self._cache_dir = cache_dir
         self._emitter = emitter
+        self._run_id = run_id
+        self._git_sha = git_sha
         self._primary_bucket = TokenBucket(rate_limit_per_minute, 60.0, clock)
         self._fallback_bucket = (
             TokenBucket(rate_limit_per_minute, 60.0, clock) if fallback is not None else None
@@ -127,7 +131,7 @@ class IngestionClient:
         params_hash = key
 
         path = _cache.cache_path(self._cache_dir, self._primary_source, tool, key)
-        cached = _cache.read(path)
+        cached = _cache.read_with_freshness(path, tool)
         if cached is not None:
             self._emitter.emit(
                 "INGESTION_CALL_CACHED",
@@ -152,7 +156,18 @@ class IngestionClient:
         target_path = _cache.cache_path(self._cache_dir, source_used, tool, key)
         new_hash_int = int(_cache.payload_hash(response)[:15], 16)
         prior_hash_int = int(prior_hash[:15], 16) if prior_hash is not None else 0
-        _cache.write(target_path, response)
+        _cache.write_with_meta(
+            target_path,
+            response,
+            cache_dir=self._cache_dir,
+            tool=tool,
+            channel=channel,
+            symbol=symbol,
+            params=params,
+            key=key,
+            pulled_by_run_id=self._run_id,
+            git_sha=self._git_sha,
+        )
 
         meta = extract_metadata(response)
         self._emitter.emit(

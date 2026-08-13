@@ -9,7 +9,6 @@ Assignment: for each grid row, `bucket_id = np.searchsorted(edges, x)`.
 Values outside all edges are clamped to `0` or `n_buckets - 1`.
 """
 
-import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -138,19 +137,26 @@ def write_bucket_stats(
     stats: BucketStats,
     output_path: Path,
     emitter: StrictSignalEmitter,
+    run_id: str = "unknown",
 ) -> str:
-    """Persist stats as JSON; emit BUCKET_STATS_WRITTEN with sha256; return the sha256."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(asdict(stats), sort_keys=True)
-    output_path.write_text(body, encoding="utf-8")
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    """Persist stats via versioned-artifact write; emit BUCKET_STATS_WRITTEN with sha256.
+
+    `output_path` is the LOGICAL base name (e.g. `artifacts/tokenizer/bucket_stats.json`).
+    The actual file lands at `bucket_stats.{run_id}.json` with a `bucket_stats.latest.json`
+    symlink pointing at the newest write. The emit's `path` field records the
+    versioned file so downstream consumers name the specific run they read.
+    """
+    from price_space_llm.artifacts import write_versioned
+
+    body = json.dumps(asdict(stats), sort_keys=True).encode("utf-8")
+    result = write_versioned(output_path, run_id, body)
     emitter.emit(
         "BUCKET_STATS_WRITTEN",
         n_buckets=str(stats.n_buckets),
-        path=str(output_path),
-        sha256=digest,
+        path=str(result.versioned_path),
+        sha256=result.sha256,
     )
-    return digest
+    return result.sha256
 
 
 def load_bucket_stats(path: Path) -> BucketStats:
@@ -218,7 +224,7 @@ def run_tokenizer(
         training_range_end=training_range_end,
         emitter=emitter,
     )
-    write_bucket_stats(stats, bucket_stats_path, emitter)
+    write_bucket_stats(stats, bucket_stats_path, emitter, run_id=run_id)
 
     target_col = _log_return_col(target_symbol)
     train_mask = (features["grid_ts"].dt.date() >= training_range_start) & (

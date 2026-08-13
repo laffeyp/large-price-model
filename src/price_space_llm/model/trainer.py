@@ -16,6 +16,7 @@ gradient_explosion. Val-metric divergence is out of scope for Sprint
 """
 
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,6 +229,12 @@ def run_training(
                 },
                 ckpt_path,
             )
+            # Point `{run_id}-latest.pt` at the newest step's checkpoint so downstream
+            # sim/eval CLIs can request "latest" per Sprint 036 artifact-versioning discipline.
+            latest_symlink = checkpoint_dir / f"{run_id}-latest.pt"
+            if latest_symlink.exists() or latest_symlink.is_symlink():
+                latest_symlink.unlink()
+            os.symlink(ckpt_path.name, latest_symlink)
             emitter.emit(
                 "CHECKPOINT_WRITTEN",
                 run_id=run_id,

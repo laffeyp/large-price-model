@@ -6,7 +6,6 @@ data/raw/), and BBO snapshots (also pre-fetched). Fits spread scaler +
 kappa. Writes two frozen artifacts and emits three vocabulary tags.
 """
 
-import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -100,11 +99,13 @@ def _pair_option_and_bbo(
     return [(atm.normalized_spread, y_bar) for atm in option_spreads]
 
 
-def _write_json_artifact(path: Path, body: dict[str, object]) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(body, sort_keys=True, indent=2)
-    path.write_text(text, encoding="utf-8")
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _write_json_artifact(path: Path, body: dict[str, object], run_id: str) -> tuple[str, Path]:
+    """Versioned write via `artifacts.write_versioned`. Returns (sha256, versioned_path)."""
+    from price_space_llm.artifacts import write_versioned
+
+    text = json.dumps(body, sort_keys=True, indent=2).encode("utf-8")
+    result = write_versioned(path, run_id, text)
+    return result.sha256, result.versioned_path
 
 
 def run_cost_calibration(
@@ -168,21 +169,21 @@ def run_cost_calibration(
         "n_bootstrap": kappa_bootstrap,
         "seed": seed,
     }
-    spread_path = output_dir / "spread_scaler.json"
-    kappa_path = output_dir / "kappa.json"
-    spread_sha = _write_json_artifact(spread_path, spread_body)
-    kappa_sha = _write_json_artifact(kappa_path, kappa_body)
+    spread_base = output_dir / "spread_scaler.json"
+    kappa_base = output_dir / "kappa.json"
+    spread_sha, spread_versioned = _write_json_artifact(spread_base, spread_body, run_id)
+    kappa_sha, kappa_versioned = _write_json_artifact(kappa_base, kappa_body, run_id)
 
     emitter.emit(
         "SPREAD_SCALER_WRITTEN",
         run_id=run_id,
-        path=str(spread_path),
+        path=str(spread_versioned),
         sha256=spread_sha,
     )
     emitter.emit(
         "KAPPA_WRITTEN",
         run_id=run_id,
-        path=str(kappa_path),
+        path=str(kappa_versioned),
         sha256=kappa_sha,
     )
     emitter.emit(
@@ -205,8 +206,8 @@ def run_cost_calibration(
         n_option_dates=len(option_spreads),
         n_bbo_snapshots=len(bbo_snapshots),
         n_intraday_bars=len(closes),
-        spread_scaler_path=str(spread_path),
-        kappa_path=str(kappa_path),
+        spread_scaler_path=str(spread_versioned),
+        kappa_path=str(kappa_versioned),
         elapsed_seconds=time.monotonic() - t0,
     )
 

@@ -346,8 +346,11 @@ def test_run_cost_calibration_emits_all_three_tags(tmp_path: Path):
     assert "SPREAD_SCALER_WRITTEN" in tags
     assert "KAPPA_WRITTEN" in tags
     assert "COST_CALIBRATION_FITTED" in tags
-    assert (tmp_path / "artifacts" / "spread_scaler.json").exists()
-    assert (tmp_path / "artifacts" / "kappa.json").exists()
+    # Sprint 036: versioned artifacts land at {stem}.{run_id}.json + latest symlink.
+    assert (tmp_path / "artifacts" / "spread_scaler.test-calibrate.json").exists()
+    assert (tmp_path / "artifacts" / "kappa.test-calibrate.json").exists()
+    assert (tmp_path / "artifacts" / "spread_scaler.latest.json").exists()
+    assert (tmp_path / "artifacts" / "kappa.latest.json").exists()
     # Two option dates → two (x, y) pairs; y is the mean-BBO anchor.
     assert result.spread_scaler.n_pairs == 2
 

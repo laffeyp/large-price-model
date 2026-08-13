@@ -72,7 +72,9 @@ def test_cli_writes_trace_and_cache_for_accepted_channels(tmp_path: Path):
     assert tags[0] == "SESSION_INIT"
     assert tags[-1] == "SESSION_COMPLETE"
 
-    cache_files = list((tmp_path / "cache").rglob("*.json"))
+    cache_files = [
+        p for p in (tmp_path / "cache").rglob("*.json") if not p.name.endswith(".meta.json")
+    ]
     assert len(cache_files) == 2
 
 
@@ -160,7 +162,9 @@ def test_cli_month_range_produces_call_per_month_per_channel(tmp_path: Path):
     assert tags.count("INGESTION_CALL_ISSUED") == 6
     assert tags.count("RAW_OBSERVATION_WRITTEN") == 6
 
-    cache_files = list((tmp_path / "cache").rglob("*.json"))
+    cache_files = [
+        p for p in (tmp_path / "cache").rglob("*.json") if not p.name.endswith(".meta.json")
+    ]
     assert len(cache_files) == 6
 
 

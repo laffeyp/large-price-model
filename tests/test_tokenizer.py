@@ -118,9 +118,11 @@ def test_write_and_load_bucket_stats_round_trip(tmp_path: Path):
         emitter=e,
     )
     path = tmp_path / "bucket_stats.json"
-    sha = write_bucket_stats(stats, path, e)
+    sha = write_bucket_stats(stats, path, e, run_id="unit-test")
     assert len(sha) == 64
-    loaded = load_bucket_stats(path)
+    # Sprint 036: versioned write lands at bucket_stats.unit-test.json; latest symlink adjacent.
+    versioned = tmp_path / "bucket_stats.unit-test.json"
+    loaded = load_bucket_stats(versioned)
     assert loaded == stats
 
 
@@ -136,9 +138,10 @@ def test_write_bucket_stats_emits_bucket_stats_written(tmp_path: Path):
         emitter=e,
     )
     path = tmp_path / "bucket_stats.json"
-    write_bucket_stats(stats, path, e)
+    write_bucket_stats(stats, path, e, run_id="unit-test")
     written = next(s for s in e.snapshot() if s.tag == "BUCKET_STATS_WRITTEN")
-    assert written.payload["path"] == str(path)
+    # Sprint 036: emit records the versioned path, not the logical base name.
+    assert written.payload["path"] == str(tmp_path / "bucket_stats.unit-test.json")
     assert written.payload["n_buckets"] == "32"
 
 
@@ -183,7 +186,9 @@ def test_run_tokenizer_writes_bucket_stats_and_tokens_parquet(tmp_path: Path):
         emitter=e,
         run_id="test-tok",
     )
-    assert stats_path.exists()
+    # Sprint 036: versioned artifact at bucket_stats.test-tok.json + latest symlink.
+    assert (tmp_path / "bucket_stats.test-tok.json").exists()
+    assert (tmp_path / "bucket_stats.latest.json").exists()
     tokens_path = output_dir / "test-tok.parquet"
     assert tokens_path.exists()
     tokens = pl.read_parquet(tokens_path)
