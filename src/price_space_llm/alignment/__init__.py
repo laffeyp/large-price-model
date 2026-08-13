@@ -14,6 +14,7 @@ observation, and `ALIGNMENT_RUN_COMPLETED` at close.
 from price_space_llm.alignment.join import (
     AlignmentResult,
     build_rth_grid,
+    enumerate_months,
     load_channel_bars,
     run_alignment,
 )
@@ -21,6 +22,7 @@ from price_space_llm.alignment.join import (
 __all__ = [
     "AlignmentResult",
     "build_rth_grid",
+    "enumerate_months",
     "load_channel_bars",
     "run_alignment",
 ]

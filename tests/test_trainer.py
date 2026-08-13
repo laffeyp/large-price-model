@@ -73,10 +73,7 @@ def test_run_training_writes_checkpoint_files(tmp_path: Path):
         checkpoint_dir=tmp_path / "ckpt",
     )
     # Exclude the `-latest.pt` symlink from Sprint 036 versioning.
-    ckpts = sorted(
-        p for p in (tmp_path / "ckpt").glob("*.pt")
-        if not p.name.endswith("-latest.pt")
-    )
+    ckpts = sorted(p for p in (tmp_path / "ckpt").glob("*.pt") if not p.name.endswith("-latest.pt"))
     assert len(ckpts) == 2
     assert result.checkpoint_dir == str(tmp_path / "ckpt")
 

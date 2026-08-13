@@ -12,6 +12,7 @@ import pytest
 from price_space_llm.alignment.join import (
     align_channels,
     build_rth_grid,
+    enumerate_months,
     load_channel_bars,
     run_alignment,
 )
@@ -247,7 +248,7 @@ def test_run_alignment_writes_parquet_and_emits_summary(tmp_path: Path):
     result = run_alignment(
         manifest_path=manifest_path,
         cache_dir=tmp_path / "cache",
-        month="2024-06",
+        months=["2024-06"],
         output_path=output,
         emitter=e,
         run_id="test-align",
@@ -279,7 +280,111 @@ def test_run_alignment_rejects_manifest_without_target(tmp_path: Path):
         run_alignment(
             manifest_path=manifest_path,
             cache_dir=tmp_path,
-            month="2024-06",
+            months=["2024-06"],
+            output_path=tmp_path / "out.parquet",
+            emitter=_fresh_emitter(),
+            run_id="test",
+        )
+
+
+# enumerate_months ---------------------------------------------------------
+
+
+def test_enumerate_months_single():
+    assert enumerate_months("2024-06", "2024-06") == ["2024-06"]
+
+
+def test_enumerate_months_within_year():
+    assert enumerate_months("2024-06", "2024-08") == ["2024-06", "2024-07", "2024-08"]
+
+
+def test_enumerate_months_crosses_year():
+    got = enumerate_months("2022-11", "2023-02")
+    assert got == ["2022-11", "2022-12", "2023-01", "2023-02"]
+
+
+def test_enumerate_months_rejects_reverse():
+    with pytest.raises(ValueError, match=r"start_month .* > end_month"):
+        enumerate_months("2024-08", "2024-06")
+
+
+def test_enumerate_months_rejects_malformed():
+    with pytest.raises(ValueError, match="YYYY-MM"):
+        enumerate_months("2024/06", "2024-08")
+
+
+def test_enumerate_months_rejects_out_of_range_index():
+    with pytest.raises(ValueError, match="out of range"):
+        enumerate_months("2024-13", "2024-14")
+
+
+# run_alignment multi-month -------------------------------------------------
+
+
+def test_run_alignment_concatenates_across_months(tmp_path: Path):
+    """Two months of cached bars → one aligned parquet spanning both months."""
+    _write_cache(
+        tmp_path / "cache",
+        "target",
+        "SPY",
+        "2024-06",
+        {
+            "2024-06-03 09:45:00": _bar(540.0),
+            "2024-06-03 10:00:00": _bar(541.0),
+        },
+    )
+    _write_cache(
+        tmp_path / "cache",
+        "target",
+        "SPY",
+        "2024-07",
+        {
+            "2024-07-01 09:45:00": _bar(550.0),
+            "2024-07-01 10:00:00": _bar(551.0),
+        },
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "target__SPY": {
+                        "channel": "target",
+                        "symbol": "SPY",
+                        "source": "mcp_av",
+                        "verdict": "accepted",
+                    }
+                }
+            }
+        )
+    )
+    output = tmp_path / "aligned.parquet"
+    e = _fresh_emitter(max_buffer=32768)
+    result = run_alignment(
+        manifest_path=manifest_path,
+        cache_dir=tmp_path / "cache",
+        months=["2024-06", "2024-07"],
+        output_path=output,
+        emitter=e,
+        run_id="test-align-range",
+    )
+    assert output.exists()
+    # Grid spans 2024-06-01 through 2024-07-31: 43 weekdays * 26 bars = 1118 rows.
+    assert result.total_rows == 1118
+
+    started = next(s for s in e.snapshot() if s.tag == "ALIGNMENT_RUN_STARTED")
+    assert started.payload["date_range_start"] == "2024-06-01"
+    assert started.payload["date_range_end"] == "2024-07-31"
+
+
+def test_run_alignment_rejects_empty_months(tmp_path: Path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"channels": {}}))
+    with pytest.raises(ValueError, match="months must not be empty"):
+        run_alignment(
+            manifest_path=manifest_path,
+            cache_dir=tmp_path,
+            months=[],
             output_path=tmp_path / "out.parquet",
             emitter=_fresh_emitter(),
             run_id="test",

@@ -17,7 +17,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from price_space_llm.alignment import run_alignment
+from price_space_llm.alignment import enumerate_months, run_alignment
 from price_space_llm.script_harness import script_session
 
 
@@ -31,19 +31,45 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-dir", type=Path, default=Path("data/raw"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/aligned"))
     parser.add_argument("--logs-dir", type=Path, default=Path("logs"))
-    parser.add_argument("--month", required=True, help="YYYY-MM")
+    parser.add_argument("--month", help="YYYY-MM (single-month shorthand)")
+    parser.add_argument("--start-month", help="YYYY-MM (inclusive start; use with --end-month)")
+    parser.add_argument("--end-month", help="YYYY-MM (inclusive end; use with --start-month)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
+
+    if args.month and (args.start_month or args.end_month):
+        print(
+            "align: pass either --month OR --start-month/--end-month, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.month and not (args.start_month and args.end_month):
+        print(
+            "align: pass --month=YYYY-MM OR --start-month=YYYY-MM --end-month=YYYY-MM",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.month:
+        months = [args.month]
+        range_tag = args.month
+    else:
+        try:
+            months = enumerate_months(args.start_month, args.end_month)
+        except ValueError as ex:
+            print(f"align: {ex}", file=sys.stderr)
+            return 2
+        range_tag = f"{args.start_month}-{args.end_month}"
 
     if not args.manifest.exists():
         print(f"align: manifest not found: {args.manifest}", file=sys.stderr)
         return 1
 
-    run_id = f"align-{args.month}-{args.seed:016d}"
+    run_id = f"align-{range_tag}-{args.seed:016d}"
     output_path = args.output_dir / f"{run_id}.parquet"
 
     manifest_bytes = args.manifest.read_bytes()
-    config_hash = hashlib.sha256(f"{args.month}:{manifest_bytes.hex()}".encode()).hexdigest()
+    config_hash = hashlib.sha256(f"{','.join(months)}:{manifest_bytes.hex()}".encode()).hexdigest()
     data_hash = hashlib.sha256(manifest_bytes).hexdigest()
 
     result = None
@@ -59,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             result = run_alignment(
                 manifest_path=args.manifest,
                 cache_dir=args.cache_dir,
-                month=args.month,
+                months=months,
                 output_path=output_path,
                 emitter=emitter,
                 run_id=run_id,

@@ -187,30 +187,72 @@ def align_channels(
     return aligned
 
 
+def enumerate_months(start_month: str, end_month: str) -> list[str]:
+    """Return `["YYYY-MM", ...]` inclusive from start_month to end_month.
+
+    Sprint 037: multi-month alignment enumerates months in the range and
+    concatenates cached bars per channel before the single as-of join.
+    Raises ValueError on malformed input or start > end.
+    """
+    try:
+        sy, sm = (int(x) for x in start_month.split("-"))
+        ey, em = (int(x) for x in end_month.split("-"))
+    except ValueError as ex:
+        raise ValueError(f"month must be YYYY-MM; got {start_month!r} / {end_month!r}") from ex
+    if not (1 <= sm <= 12 and 1 <= em <= 12):
+        raise ValueError(f"month index out of range: {start_month!r} / {end_month!r}")
+    if (sy, sm) > (ey, em):
+        raise ValueError(f"start_month {start_month} > end_month {end_month}")
+
+    out: list[str] = []
+    y, m = sy, sm
+    while (y, m) <= (ey, em):
+        out.append(f"{y:04d}-{m:02d}")
+        m += 1
+        if m == 13:
+            m = 1
+            y += 1
+    return out
+
+
+def _month_first_day(month: str) -> date:
+    year, mo = month.split("-")
+    return date(int(year), int(mo), 1)
+
+
+def _month_last_day(month: str) -> date:
+    year, mo = (int(x) for x in month.split("-"))
+    if mo == 12:
+        return date(year + 1, 1, 1) - timedelta(days=1)
+    return date(year, mo + 1, 1) - timedelta(days=1)
+
+
 def run_alignment(
     manifest_path: Path,
     cache_dir: Path,
-    month: str,
+    months: list[str],
     output_path: Path,
     emitter: StrictSignalEmitter,
     run_id: str,
 ) -> AlignmentResult:
-    """End-to-end alignment for one month. Reads manifest → loads bars → aligns → writes parquet."""
+    """End-to-end alignment over `months` (inclusive list). Reads manifest → loads bars
+    across all months per channel → concatenates → aligns to one grid → writes parquet.
+
+    Single-month callers pass `months=["YYYY-MM"]`. Multi-month callers pass the enumerated
+    list from `enumerate_months(start_month, end_month)`. The RTH grid spans first day of
+    the earliest month to last day of the latest.
+    """
+    if not months:
+        raise ValueError("months must not be empty")
+
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     accepted = [c for c in manifest["channels"].values() if c.get("verdict") == "accepted"]
     if not accepted:
         raise ValueError(f"no accepted channels in {manifest_path}")
 
-    year, mo = month.split("-")
-    start = date(int(year), int(mo), 1)
-    # Last day of month:
-    if int(mo) == 12:
-        end = date(int(year) + 1, 1, 1) - timedelta(days=1)
-    else:
-        end = date(int(year), int(mo) + 1, 1) - timedelta(days=1)
+    start = _month_first_day(months[0])
+    end = _month_last_day(months[-1])
 
-    # Dedupe channel categories; the vocabulary's ALIGNMENT_RUN_STARTED.channels
-    # is a list of distinct Channel entities, not per-symbol pairs.
     channels_names = sorted({c["channel"] for c in accepted})
     target = next((c["symbol"] for c in accepted if c["channel"] == "target"), None)
     if target is None:
@@ -229,22 +271,26 @@ def run_alignment(
 
     channel_bars: dict[str, pl.DataFrame] = {}
     for c in accepted:
-        params = {
-            "symbol": c["symbol"],
-            "interval": "15min",
-            "month": month,
-            "outputsize": "full",
-            "datatype": "json",
-        }
-        bars = load_channel_bars(
-            cache_dir=cache_dir,
-            source=c["source"],
-            tool="TIME_SERIES_INTRADAY",
-            channel=c["channel"],
-            symbol=c["symbol"],
-            params=params,
-        )
-        channel_bars[f"{c['channel']}__{c['symbol']}"] = bars
+        per_month: list[pl.DataFrame] = []
+        for month in months:
+            params = {
+                "symbol": c["symbol"],
+                "interval": "15min",
+                "month": month,
+                "outputsize": "full",
+                "datatype": "json",
+            }
+            bars = load_channel_bars(
+                cache_dir=cache_dir,
+                source=c["source"],
+                tool="TIME_SERIES_INTRADAY",
+                channel=c["channel"],
+                symbol=c["symbol"],
+                params=params,
+            )
+            per_month.append(bars)
+        combined = pl.concat(per_month).unique(subset="known_at").sort("known_at")
+        channel_bars[f"{c['channel']}__{c['symbol']}"] = combined
 
     grid = build_rth_grid(start, end)
     aligned = align_channels(grid, channel_bars, emitter)
