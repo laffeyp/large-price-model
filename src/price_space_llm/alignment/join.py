@@ -89,6 +89,60 @@ def load_channel_bars(
     return pl.DataFrame(rows).sort("known_at")
 
 
+def load_index_daily_bars(
+    cache_dir: Path,
+    source: str,
+    tool: str,
+    channel: str,
+    symbol: str,
+    params: dict[str, Any],
+) -> pl.DataFrame:
+    """Read a cached INDEX_DATA daily response and return bars stamped `known_at`.
+
+    Alpha-Vantage's `INDEX_DATA` returns `{"symbol", "name", "interval",
+    "data": [{"date", "open", "high", "low", "close"}, ...]}` — one row per
+    trading day. Sprint 038 uses this endpoint for VIX (no intraday VIX exists
+    on the platform; the underlying is an index, not an equity).
+
+    `known_at` per row = market close in US/Eastern at 16:00 + 1 minute, cast
+    to UTC via the same fixed offset the RTH grid uses. Downstream
+    `polars.join_asof(strategy="backward")` on `known_at` then forward-fills
+    the daily close onto every 15-min grid bar that comes after it, which is
+    the correct causality: at 09:45 on day D the model sees the prior day's
+    close; at 21:00 UTC on day D it still sees the prior day's close because
+    day D's close doesn't print until 21:01 UTC.
+    """
+    key = _cache.cache_key(tool, channel, symbol, params)
+    path = _cache.cache_path(cache_dir, source, tool, key)
+    payload = _cache.read(path)
+    if payload is None:
+        raise FileNotFoundError(f"cache miss for {channel}/{symbol}: {path}")
+
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        raise ValueError(f"INDEX_DATA response for {channel}/{symbol} has no non-empty 'data' list")
+
+    rows: list[dict[str, Any]] = []
+    for row in data:
+        date_str = row.get("date")
+        if not date_str:
+            continue
+        naive_close = datetime.strptime(f"{date_str} 16:00:00", "%Y-%m-%d %H:%M:%S")
+        close_utc = naive_close.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+        known_at = close_utc + timedelta(minutes=1)
+        close = float(row.get("close", "0"))
+        rows.append(
+            {
+                "known_at": known_at,
+                "close": close,
+                "channel": channel,
+                "symbol": symbol,
+            }
+        )
+
+    return pl.DataFrame(rows).sort("known_at")
+
+
 def _us_eastern_zone() -> tzinfo:
     """Return a fixed-offset US/Eastern tzinfo matching `alphavantage.US_EASTERN_OFFSET`."""
     return timezone(US_EASTERN_OFFSET)
@@ -271,25 +325,39 @@ def run_alignment(
 
     channel_bars: dict[str, pl.DataFrame] = {}
     for c in accepted:
-        per_month: list[pl.DataFrame] = []
-        for month in months:
-            params = {
-                "symbol": c["symbol"],
-                "interval": "15min",
-                "month": month,
-                "outputsize": "full",
-                "datatype": "json",
-            }
-            bars = load_channel_bars(
+        tool = c.get("tool", "TIME_SERIES_INTRADAY")
+        if tool == "INDEX_DATA":
+            params = {"symbol": c["symbol"], "interval": "daily", "datatype": "json"}
+            combined = load_index_daily_bars(
                 cache_dir=cache_dir,
                 source=c["source"],
-                tool="TIME_SERIES_INTRADAY",
+                tool=tool,
                 channel=c["channel"],
                 symbol=c["symbol"],
                 params=params,
             )
-            per_month.append(bars)
-        combined = pl.concat(per_month).unique(subset="known_at").sort("known_at")
+        elif tool == "TIME_SERIES_INTRADAY":
+            per_month: list[pl.DataFrame] = []
+            for month in months:
+                params = {
+                    "symbol": c["symbol"],
+                    "interval": "15min",
+                    "month": month,
+                    "outputsize": "full",
+                    "datatype": "json",
+                }
+                bars = load_channel_bars(
+                    cache_dir=cache_dir,
+                    source=c["source"],
+                    tool=tool,
+                    channel=c["channel"],
+                    symbol=c["symbol"],
+                    params=params,
+                )
+                per_month.append(bars)
+            combined = pl.concat(per_month).unique(subset="known_at").sort("known_at")
+        else:
+            raise ValueError(f"unsupported tool {tool!r} on channel {c['channel']}/{c['symbol']}")
         channel_bars[f"{c['channel']}__{c['symbol']}"] = combined
 
     grid = build_rth_grid(start, end)

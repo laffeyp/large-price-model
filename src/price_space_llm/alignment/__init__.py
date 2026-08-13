@@ -16,6 +16,7 @@ from price_space_llm.alignment.join import (
     build_rth_grid,
     enumerate_months,
     load_channel_bars,
+    load_index_daily_bars,
     run_alignment,
 )
 
@@ -24,5 +25,6 @@ __all__ = [
     "build_rth_grid",
     "enumerate_months",
     "load_channel_bars",
+    "load_index_daily_bars",
     "run_alignment",
 ]

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from price_space_llm.ingestion.alphavantage import (
     alphavantage_extract_metadata,
+    alphavantage_index_extract_metadata,
     make_alphavantage_raw_fetcher,
 )
 from price_space_llm.ingestion.client import IngestionCallFailed, IngestionClient, RawFetcher
@@ -50,10 +51,20 @@ def _month_range(start: str, end: str) -> list[str]:
 
 
 def _load_accepted_channels(manifest_path: Path) -> list[dict[str, str]]:
-    """Return the list of {channel, symbol, source} entries with verdict=accepted."""
+    """Return the list of {channel, symbol, source, tool} entries with verdict=accepted.
+
+    `tool` defaults to `TIME_SERIES_INTRADAY` when unset in the manifest.
+    Sprint 038 added per-channel tool dispatch so INDEX_DATA channels (VIX)
+    can coexist with TIME_SERIES_INTRADAY channels (SPY) in one pull.
+    """
     doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     return [
-        {"channel": c["channel"], "symbol": c["symbol"], "source": c["source"]}
+        {
+            "channel": c["channel"],
+            "symbol": c["symbol"],
+            "source": c["source"],
+            "tool": c.get("tool", "TIME_SERIES_INTRADAY"),
+        }
         for c in doc["channels"].values()
         if c.get("verdict") == "accepted"
     ]
@@ -144,8 +155,40 @@ def main(argv: list[str] | None = None) -> int:
             emitter=emitter,
             clock=time.monotonic,
         )
+        index_channels = [c for c in channels if c["tool"] == "INDEX_DATA"]
+        intraday_channels = [c for c in channels if c["tool"] == "TIME_SERIES_INTRADAY"]
+        other_channels = [
+            c for c in channels if c["tool"] not in {"INDEX_DATA", "TIME_SERIES_INTRADAY"}
+        ]
+        if other_channels:
+            print(
+                f"ingest: unsupported tool on {len(other_channels)} channels; "
+                f"tools={sorted({c['tool'] for c in other_channels})}",
+                file=sys.stderr,
+            )
+            return 1
+
+        for ch in index_channels:
+            try:
+                client.call(
+                    channel=ch["channel"],
+                    symbol=ch["symbol"],
+                    tool="INDEX_DATA",
+                    params={
+                        "symbol": ch["symbol"],
+                        "interval": "daily",
+                        "datatype": "json",
+                    },
+                    extract_metadata=alphavantage_index_extract_metadata,
+                )
+                n_ok += 1
+            except IngestionCallFailed:
+                traceback.print_exc(file=sys.stderr)
+                n_failed += 1
+                exit_code = 2
+
         for month in months:
-            for ch in channels:
+            for ch in intraday_channels:
                 try:
                     client.call(
                         channel=ch["channel"],

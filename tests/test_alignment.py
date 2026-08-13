@@ -14,6 +14,7 @@ from price_space_llm.alignment.join import (
     build_rth_grid,
     enumerate_months,
     load_channel_bars,
+    load_index_daily_bars,
     run_alignment,
 )
 from price_space_llm.ingestion import cache as _cache
@@ -375,6 +376,154 @@ def test_run_alignment_concatenates_across_months(tmp_path: Path):
     started = next(s for s in e.snapshot() if s.tag == "ALIGNMENT_RUN_STARTED")
     assert started.payload["date_range_start"] == "2024-06-01"
     assert started.payload["date_range_end"] == "2024-07-31"
+
+
+# load_index_daily_bars (Sprint 038) ---------------------------------------
+
+
+def _write_index_cache(tmp_path: Path, channel: str, symbol: str, rows: list[dict]) -> Path:
+    """Write a cached INDEX_DATA response with the given daily rows."""
+    params = {"symbol": symbol, "interval": "daily", "datatype": "json"}
+    key = _cache.cache_key("INDEX_DATA", channel, symbol, params)
+    path = _cache.cache_path(tmp_path, "mcp_av", "INDEX_DATA", key)
+    payload = {
+        "symbol": symbol,
+        "name": f"{symbol} test",
+        "interval": "daily",
+        "data": rows,
+    }
+    _cache.write(path, payload)
+    return path
+
+
+def test_load_index_daily_bars_stamps_known_at_at_21_utc(tmp_path: Path):
+    """VIX daily close at 16:00 US/Eastern (fixed -5) → 21:00 UTC; known_at = +1min."""
+    _write_index_cache(
+        tmp_path,
+        "market_context",
+        "VIX",
+        [
+            {"date": "2024-06-28", "open": "12.5", "high": "13.0", "low": "12.4", "close": "12.55"},
+            {"date": "2024-06-27", "open": "12.6", "high": "12.9", "low": "12.5", "close": "12.60"},
+        ],
+    )
+    bars = load_index_daily_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        tool="INDEX_DATA",
+        channel="market_context",
+        symbol="VIX",
+        params={"symbol": "VIX", "interval": "daily", "datatype": "json"},
+    )
+    assert bars.height == 2
+    assert bars["close"].to_list() == [12.60, 12.55]  # sorted by known_at ascending
+    first_known = bars["known_at"][0]
+    assert first_known.hour == 21
+    assert first_known.minute == 1
+    assert first_known.date() == datetime(2024, 6, 27).date()
+
+
+def test_load_index_daily_bars_raises_on_empty_data(tmp_path: Path):
+    _write_index_cache(tmp_path, "market_context", "VIX", [])
+    with pytest.raises(ValueError, match="no non-empty 'data' list"):
+        load_index_daily_bars(
+            cache_dir=tmp_path,
+            source="mcp_av",
+            tool="INDEX_DATA",
+            channel="market_context",
+            symbol="VIX",
+            params={"symbol": "VIX", "interval": "daily", "datatype": "json"},
+        )
+
+
+def test_run_alignment_dispatches_index_data_channel(tmp_path: Path):
+    """One INDEX_DATA channel + one TIME_SERIES_INTRADAY channel align together;
+    the daily VIX close forward-fills onto every 15-min RTH bar after it."""
+    _write_cache(
+        tmp_path / "cache",
+        "target",
+        "SPY",
+        "2024-06",
+        {
+            "2024-06-03 09:45:00": _bar(540.0),
+            "2024-06-03 10:00:00": _bar(541.0),
+        },
+    )
+    _write_index_cache(
+        tmp_path / "cache",
+        "market_context",
+        "VIX",
+        [
+            {"date": "2024-05-31", "open": "12.5", "high": "13.0", "low": "12.4", "close": "12.92"},
+        ],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "target__SPY": {
+                        "channel": "target",
+                        "symbol": "SPY",
+                        "source": "mcp_av",
+                        "tool": "TIME_SERIES_INTRADAY",
+                        "verdict": "accepted",
+                    },
+                    "market_context__VIX": {
+                        "channel": "market_context",
+                        "symbol": "VIX",
+                        "source": "mcp_av",
+                        "tool": "INDEX_DATA",
+                        "verdict": "accepted",
+                    },
+                }
+            }
+        )
+    )
+    output = tmp_path / "aligned.parquet"
+    e = _fresh_emitter(max_buffer=32768)
+    result = run_alignment(
+        manifest_path=manifest_path,
+        cache_dir=tmp_path / "cache",
+        months=["2024-06"],
+        output_path=output,
+        emitter=e,
+        run_id="test-align-index",
+    )
+    aligned = pl.read_parquet(output)
+    # Every RTH bar in June sees the 2024-05-31 close = 12.92 (Fri before Mon 06-03).
+    non_null_vix = aligned.filter(pl.col("market_context__VIX__close").is_not_null())
+    assert non_null_vix.height > 0
+    assert non_null_vix["market_context__VIX__close"].unique().to_list() == [12.92]
+    assert result.total_rows > 0
+
+
+def test_run_alignment_rejects_unsupported_tool(tmp_path: Path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "target__SPY": {
+                        "channel": "target",
+                        "symbol": "SPY",
+                        "source": "mcp_av",
+                        "tool": "NONESUCH_ENDPOINT",
+                        "verdict": "accepted",
+                    }
+                }
+            }
+        )
+    )
+    with pytest.raises(ValueError, match=r"unsupported tool"):
+        run_alignment(
+            manifest_path=manifest_path,
+            cache_dir=tmp_path,
+            months=["2024-06"],
+            output_path=tmp_path / "out.parquet",
+            emitter=_fresh_emitter(),
+            run_id="test",
+        )
 
 
 def test_run_alignment_rejects_empty_months(tmp_path: Path):

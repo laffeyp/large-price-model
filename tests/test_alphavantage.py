@@ -10,6 +10,7 @@ from price_space_llm.ingestion.alphavantage import (
     AlphaVantageRateLimitError,
     AlphaVantageResponseError,
     alphavantage_extract_metadata,
+    alphavantage_index_extract_metadata,
     make_alphavantage_fetcher,
     make_alphavantage_raw_fetcher,
 )
@@ -262,3 +263,53 @@ def test_extract_metadata_raises_on_missing_time_series_key():
 def test_extract_metadata_raises_on_empty_series():
     with pytest.raises(AlphaVantageResponseError, match="empty Time Series"):
         alphavantage_extract_metadata({"Time Series (15min)": {}})
+
+
+# INDEX_DATA extractor (Sprint 038) ----------------------------------------
+
+
+def _canned_index_daily(n_rows: int = 3) -> dict:
+    """Build an Alpha-Vantage INDEX_DATA-shaped VIX daily response."""
+    return {
+        "symbol": "VIX",
+        "name": "Cboe Volatility Index",
+        "interval": "daily",
+        "data": [
+            {
+                "date": f"2024-06-{28 - i:02d}",
+                "open": "12.5",
+                "high": "13.0",
+                "low": "12.4",
+                "close": f"12.{50 + i}",
+            }
+            for i in range(n_rows)
+        ],
+    }
+
+
+def test_index_extract_metadata_uses_16_est_close():
+    """Latest row's date at 16:00 US/Eastern → UTC = 21:00. known_at = value_time + 1min."""
+    meta = alphavantage_index_extract_metadata(_canned_index_daily(n_rows=5))
+    assert meta.rows_written == 5
+    # Latest row date: 2024-06-28. 16:00 US/Eastern (fixed -5) → 21:00 UTC.
+    assert meta.value_time.year == 2024
+    assert meta.value_time.month == 6
+    assert meta.value_time.day == 28
+    assert meta.value_time.hour == 21
+    assert meta.value_time.minute == 0
+    assert (meta.known_at - meta.value_time).total_seconds() == 60.0
+
+
+def test_index_extract_metadata_raises_on_empty_data():
+    with pytest.raises(AlphaVantageResponseError, match="no non-empty 'data' list"):
+        alphavantage_index_extract_metadata({"symbol": "VIX", "data": []})
+
+
+def test_index_extract_metadata_raises_on_missing_data_key():
+    with pytest.raises(AlphaVantageResponseError, match="no non-empty 'data' list"):
+        alphavantage_index_extract_metadata({"symbol": "VIX"})
+
+
+def test_index_extract_metadata_raises_on_row_without_date():
+    with pytest.raises(AlphaVantageResponseError, match="missing 'date' field"):
+        alphavantage_index_extract_metadata({"symbol": "VIX", "data": [{"close": "12.5"}]})
