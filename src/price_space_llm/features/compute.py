@@ -37,6 +37,21 @@ FEATURE_SPECS: tuple[str, ...] = (
     "rolling_z_score_20",
 )
 
+# Sprint 049: six spec §6 target features (tech-arch line 302). Apply only to
+# the target channel (channel_name == "target"). Cross-asset variants land in
+# Sprint 050.
+TARGET_FEATURE_SPECS: tuple[str, ...] = (
+    "bar_shape",
+    "range_pct",
+    "volume_z_100",
+    "dollar_volume",
+    "spread_proxy",
+    "realized_vol_30",
+)
+VOLUME_ROLLING_WINDOW = 100
+REALIZED_VOL_WINDOW = 30
+BAR_SHAPE_EPS = 1e-12
+
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class FeatureResult:
@@ -101,15 +116,86 @@ def compute_features(
                 ).alias(rz_col),
             ]
         )
-        out = out.hstack(with_z.select([log_ret_col, rmean_col, rstd_col, rz_col]))
+        base_cols = [log_ret_col, rmean_col, rstd_col, rz_col]
+        out = out.hstack(with_z.select(base_cols))
+
+        feature_names = list(FEATURE_SPECS)
+        emit_frame = with_z
+
+        # Sprint 049: six spec §6 target features layer on the target channel
+        # only. Consumes OHLCV columns Sprint 042 wrote plus the log_return the
+        # base pass just computed.
+        if channel_name == "target":
+            open_col = f"{key}__open"
+            high_col = f"{key}__high"
+            low_col = f"{key}__low"
+            volume_col = f"{key}__volume"
+            bar_shape_col = f"{key}__bar_shape"
+            range_pct_col = f"{key}__range_pct"
+            volume_z_col = f"{key}__volume_z_100"
+            dollar_vol_col = f"{key}__dollar_volume"
+            spread_col = f"{key}__spread_proxy"
+            rvol_col = f"{key}__realized_vol_30"
+            vol_mean_col = f"{key}__volume_roll_mean_100"
+            vol_std_col = f"{key}__volume_roll_std_100"
+
+            with_target = with_z.with_columns(
+                [
+                    (
+                        (pl.col(close_col) - pl.col(open_col))
+                        / (pl.col(high_col) - pl.col(low_col) + BAR_SHAPE_EPS)
+                    ).alias(bar_shape_col),
+                    ((pl.col(high_col) - pl.col(low_col)) / pl.col(close_col).shift(1)).alias(
+                        range_pct_col
+                    ),
+                    (pl.col(close_col) * pl.col(volume_col)).alias(dollar_vol_col),
+                    (
+                        (2.0 * (pl.col(high_col) - pl.col(low_col)).abs())
+                        / (pl.col(high_col) + pl.col(low_col))
+                    ).alias(spread_col),
+                    pl.col(volume_col)
+                    .rolling_mean(window_size=VOLUME_ROLLING_WINDOW)
+                    .alias(vol_mean_col),
+                    pl.col(volume_col)
+                    .rolling_std(window_size=VOLUME_ROLLING_WINDOW)
+                    .alias(vol_std_col),
+                    pl.col(log_ret_col)
+                    .rolling_std(window_size=REALIZED_VOL_WINDOW)
+                    .alias(rvol_col),
+                ]
+            )
+            with_target = with_target.with_columns(
+                [
+                    (
+                        pl.when(pl.col(vol_std_col) == 0)
+                        .then(None)
+                        .otherwise(
+                            (pl.col(volume_col) - pl.col(vol_mean_col)) / pl.col(vol_std_col)
+                        )
+                    ).alias(volume_z_col),
+                ]
+            )
+            target_out_cols = [
+                bar_shape_col,
+                range_pct_col,
+                volume_z_col,
+                dollar_vol_col,
+                spread_col,
+                rvol_col,
+            ]
+            out = out.hstack(with_target.select(target_out_cols))
+            feature_names = feature_names + list(TARGET_FEATURE_SPECS)
+            emit_frame = with_target
 
         grid_ts_values = aligned["grid_ts"].to_list()
-        for feature_name in FEATURE_SPECS:
+        for feature_name in feature_names:
             col_name = f"{key}__{feature_name}"
-            values = with_z[col_name].to_list()
+            values = emit_frame[col_name].to_list()
             for ts, val in zip(grid_ts_values, values, strict=True):
                 if val is None or (isinstance(val, float) and math.isnan(val)):
-                    reason = _classify_failure(feature_name, close_col, with_z, grid_ts_values, ts)
+                    reason = _classify_failure(
+                        feature_name, close_col, emit_frame, grid_ts_values, ts
+                    )
                     emitter.emit(
                         "FEATURE_COMPUTATION_FAILED",
                         timestamp=ts.isoformat(),
@@ -157,6 +243,48 @@ def _classify_failure(
             rstd_val = df[rstd_col].to_list()[row_idx]
             if rstd_val == 0:
                 return "divide_by_zero"
+    # Sprint 049: target-feature failure classification.
+    if feature_name == "range_pct" and row_idx == 0:
+        return "insufficient_history"
+    if feature_name == "volume_z_100":
+        if row_idx < VOLUME_ROLLING_WINDOW:
+            return "insufficient_history"
+        vol_std_col = close_col.replace("__close", "__volume_roll_std_100")
+        if vol_std_col in df.columns:
+            v = df[vol_std_col].to_list()[row_idx]
+            if v == 0:
+                return "divide_by_zero"
+    if feature_name == "realized_vol_30" and row_idx < REALIZED_VOL_WINDOW:
+        return "insufficient_history"
+    if feature_name == "bar_shape":
+        high_col = close_col.replace("__close", "__high")
+        low_col = close_col.replace("__close", "__low")
+        if high_col in df.columns and low_col in df.columns:
+            h = df[high_col].to_list()[row_idx]
+            lo = df[low_col].to_list()[row_idx]
+            if h is not None and lo is not None and h == lo:
+                # eps floor kept the divisor non-zero and the numerator zero,
+                # yielding value 0 (not null). If this feature is null and
+                # high == low, the classification is nan_input on close/open.
+                open_col = close_col.replace("__close", "__open")
+                if open_col in df.columns:
+                    op = df[open_col].to_list()[row_idx]
+                    if op is None:
+                        return "nan_input"
+    if feature_name == "spread_proxy":
+        high_col = close_col.replace("__close", "__high")
+        low_col = close_col.replace("__close", "__low")
+        if high_col in df.columns and low_col in df.columns:
+            h = df[high_col].to_list()[row_idx]
+            lo = df[low_col].to_list()[row_idx]
+            if h is not None and lo is not None and (h + lo) == 0:
+                return "divide_by_zero"
+    if feature_name == "dollar_volume":
+        volume_col = close_col.replace("__close", "__volume")
+        if volume_col in df.columns:
+            v = df[volume_col].to_list()[row_idx]
+            if v is None:
+                return "nan_input"
     return "downstream_error"
 
 
@@ -176,7 +304,13 @@ def run_feature_pipeline(
     features.write_parquet(output_path)
 
     channel_columns = _channel_close_columns(aligned)
-    n_features_emitted = aligned.height * len(FEATURE_SPECS) * len(channel_columns) - n_failures
+    # Sprint 049: target channel emits FEATURE_SPECS + TARGET_FEATURE_SPECS;
+    # non-target channels emit FEATURE_SPECS only.
+    per_channel_feature_counts = sum(
+        len(FEATURE_SPECS) + (len(TARGET_FEATURE_SPECS) if channel_name == "target" else 0)
+        for _, (_, channel_name) in channel_columns.items()
+    )
+    n_features_emitted = aligned.height * per_channel_feature_counts - n_failures
 
     return FeatureResult(
         run_id=run_id,

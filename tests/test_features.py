@@ -23,7 +23,11 @@ def _fresh_emitter(max_buffer: int = 16384) -> StrictSignalEmitter:
 
 
 def _synthetic_aligned(n_rows: int, closes: list[float] | None = None) -> pl.DataFrame:
-    """One-channel aligned DataFrame with monotonic timestamps and given closes."""
+    """One-channel aligned DataFrame with monotonic timestamps and given closes.
+
+    Sprint 049: adds synthetic OHLCV columns so target-feature block has inputs.
+    open=close-0.1, high=close+0.2, low=close-0.2, volume=1_000_000.
+    """
     base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
     grid_ts = [base + timedelta(minutes=15 * i) for i in range(n_rows)]
     known_at = [t + timedelta(seconds=1) for t in grid_ts]
@@ -33,7 +37,11 @@ def _synthetic_aligned(n_rows: int, closes: list[float] | None = None) -> pl.Dat
         {
             "grid_ts": grid_ts,
             "target__SPY__known_at": known_at,
+            "target__SPY__open": [c - 0.1 for c in closes],
+            "target__SPY__high": [c + 0.2 for c in closes],
+            "target__SPY__low": [c - 0.2 for c in closes],
             "target__SPY__close": closes,
+            "target__SPY__volume": [1_000_000 for _ in closes],
         }
     )
 
@@ -127,8 +135,11 @@ def test_run_feature_pipeline_writes_parquet(tmp_path: Path):
     assert result.n_features_emitted > 0
 
 
-def test_two_channels_produce_eight_feature_columns():
-    """Two channels x four features = eight feature columns in the output."""
+def test_two_channels_produce_expected_feature_columns():
+    """Sprint 049: target contributes FEATURE_SPECS (4) + TARGET_FEATURE_SPECS (6); a
+    non-target channel contributes FEATURE_SPECS (4) only."""
+    from price_space_llm.features.compute import TARGET_FEATURE_SPECS
+
     aligned = _synthetic_aligned(n_rows=5)
     aligned = aligned.with_columns(
         [
@@ -139,7 +150,188 @@ def test_two_channels_produce_eight_feature_columns():
     e = _fresh_emitter()
     features, _ = compute_features(aligned, e)
     feature_cols = [c for c in features.columns if c != "grid_ts"]
-    assert len(feature_cols) == 8
+    expected = len(FEATURE_SPECS) + len(TARGET_FEATURE_SPECS) + len(FEATURE_SPECS)
+    assert len(feature_cols) == expected  # 4 + 6 + 4 = 14
+
+
+# target features (Sprint 049) ---------------------------------------------
+
+
+def _target_frame(n_rows: int, opens, highs, lows, closes, volumes) -> pl.DataFrame:
+    """Explicit-OHLCV target-only aligned frame for target-feature tests."""
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n_rows)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    return pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": opens,
+            "target__SPY__high": highs,
+            "target__SPY__low": lows,
+            "target__SPY__close": closes,
+            "target__SPY__volume": volumes,
+        }
+    )
+
+
+def test_bar_shape_matches_formula():
+    """bar_shape = (close - open) / (high - low + eps). Rising bar: positive; falling: negative."""
+    df = _target_frame(
+        n_rows=3,
+        opens=[100.0, 100.0, 100.0],
+        highs=[102.0, 102.0, 102.0],
+        lows=[99.0, 99.0, 99.0],
+        closes=[101.5, 99.5, 100.0],
+        volumes=[1000, 1000, 1000],
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    got = features["target__SPY__bar_shape"].to_list()
+    assert got[0] == pytest_approx((101.5 - 100.0) / (102.0 - 99.0 + 1e-12))
+    assert got[1] == pytest_approx((99.5 - 100.0) / (102.0 - 99.0 + 1e-12))
+    assert got[2] == pytest_approx(0.0)
+
+
+def test_bar_shape_survives_flat_bar():
+    """A flat bar (high == low) does not raise; eps keeps the divisor positive; value = 0."""
+    df = _target_frame(
+        n_rows=1,
+        opens=[100.0],
+        highs=[100.0],
+        lows=[100.0],
+        closes=[100.0],
+        volumes=[1000],
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    assert features["target__SPY__bar_shape"][0] == pytest_approx(0.0)
+
+
+def test_range_pct_uses_prior_close():
+    """range_pct = (high - low) / close_{t-1}. Row 0 is null."""
+    df = _target_frame(
+        n_rows=3,
+        opens=[100.0, 100.0, 100.0],
+        highs=[102.0, 103.0, 101.0],
+        lows=[99.0, 98.0, 99.5],
+        closes=[100.0, 101.0, 100.5],
+        volumes=[1000, 1000, 1000],
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    got = features["target__SPY__range_pct"].to_list()
+    assert got[0] is None
+    assert got[1] == pytest_approx((103.0 - 98.0) / 100.0)
+    assert got[2] == pytest_approx((101.0 - 99.5) / 101.0)
+
+
+def test_dollar_volume_is_close_times_volume():
+    df = _target_frame(
+        n_rows=2,
+        opens=[100.0, 100.0],
+        highs=[101.0, 101.0],
+        lows=[99.0, 99.0],
+        closes=[100.5, 100.0],
+        volumes=[2000, 4000],
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    got = features["target__SPY__dollar_volume"].to_list()
+    assert got[0] == pytest_approx(100.5 * 2000)
+    assert got[1] == pytest_approx(100.0 * 4000)
+
+
+def test_spread_proxy_matches_corwin_schultz_style():
+    """spread_proxy = 2 * |high - low| / (high + low)."""
+    df = _target_frame(
+        n_rows=1,
+        opens=[100.0],
+        highs=[102.0],
+        lows=[98.0],
+        closes=[100.0],
+        volumes=[1000],
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    expected = 2.0 * (102.0 - 98.0) / (102.0 + 98.0)
+    assert features["target__SPY__spread_proxy"][0] == pytest_approx(expected)
+
+
+def test_realized_vol_30_null_before_full_window():
+    """realized_vol_30 uses 30-bar rolling std of log_return; log_return itself is
+    null at row 0, so realized_vol_30 is null through row 30 inclusive."""
+    closes = [100.0 * (1.0 + 0.001 * ((-1) ** i)) for i in range(35)]
+    df = _target_frame(
+        n_rows=35,
+        opens=closes,
+        highs=[c * 1.001 for c in closes],
+        lows=[c * 0.999 for c in closes],
+        closes=closes,
+        volumes=[1000] * 35,
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    got = features["target__SPY__realized_vol_30"].to_list()
+    # Row 29 sees only 29 valid log_return values (rows 1-29); the rolling_std
+    # window needs 30, so it's null.
+    assert got[29] is None
+    assert got[30] is not None
+
+
+def test_volume_z_100_null_through_row_99():
+    """volume_z_100 uses 100-bar rolling stats over volume; null through row 99."""
+    closes = [100.0 + 0.1 * i for i in range(105)]
+    df = _target_frame(
+        n_rows=105,
+        opens=closes,
+        highs=[c + 0.5 for c in closes],
+        lows=[c - 0.5 for c in closes],
+        closes=closes,
+        volumes=[1000 + i for i in range(105)],
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    got = features["target__SPY__volume_z_100"].to_list()
+    assert got[98] is None
+    # Row 99 has 100 volume values (indices 0-99), so rolling_std is defined.
+    assert got[99] is not None
+
+
+def test_non_target_channels_get_no_target_features():
+    """Sprint 049: only channel_name == 'target' triggers target-feature block."""
+    df = _target_frame(
+        n_rows=5,
+        opens=[100.0] * 5,
+        highs=[101.0] * 5,
+        lows=[99.0] * 5,
+        closes=[100.0] * 5,
+        volumes=[1000] * 5,
+    )
+    df = df.with_columns(
+        [
+            pl.lit(80.0).alias("market_context__USO__close"),
+            pl.col("target__SPY__known_at").alias("market_context__USO__known_at"),
+        ]
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    # Target has 4 base + 6 target features; USO has 4 base + 0 target.
+    assert "target__SPY__bar_shape" in features.columns
+    assert "market_context__USO__bar_shape" not in features.columns
+    assert "market_context__USO__log_return" in features.columns
+
+
+def test_failure_reason_insufficient_history_on_realized_vol_30():
+    df = _target_frame(
+        n_rows=3,
+        opens=[100.0, 100.0, 100.0],
+        highs=[101.0, 101.0, 101.0],
+        lows=[99.0, 99.0, 99.0],
+        closes=[100.0, 100.5, 100.2],
+        volumes=[1000, 1000, 1000],
+    )
+    e = _fresh_emitter()
+    compute_features(df, e)
+    fails = [
+        s
+        for s in e.snapshot()
+        if s.tag == "FEATURE_COMPUTATION_FAILED" and s.payload["feature_name"] == "realized_vol_30"
+    ]
+    assert fails
+    assert all(s.payload["reason"] == "insufficient_history" for s in fails)
 
 
 def pytest_approx(val: float, tol: float = 1e-9):
