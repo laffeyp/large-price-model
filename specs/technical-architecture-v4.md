@@ -71,7 +71,7 @@ Data flows one way: vendor sources → channel-coverage probe → aligned Parque
               └───────────┬────────────┘         (dict[str, Tensor[T, F_c]])
                           ▼
               ┌────────────────────────┐
-              │  training loop         │  AdamW, bf16, cosine LR, W&B
+              │  training loop         │  AdamW, bf16, cosine LR, SDD trace
               │  (causal transformer,  │  all-position CE, random-window
               │   per-position CE)     │  sampling; checkpoint by val NLL
               └───────────┬────────────┘         artifacts/{run_id}/*.ckpt
@@ -91,7 +91,7 @@ Data flows one way: vendor sources → channel-coverage probe → aligned Parque
               └───────────┬────────────┘
                           ▼
               ┌────────────────────────┐
-              │  results / logbook     │  experiments/logbook.csv + W&B run
+              │  results / logbook     │  experiments/logbook.csv + JSONL trace
               └────────────────────────┘
 ```
 
@@ -560,7 +560,7 @@ Validation NLL is computed the same way training loss is: per-position cross-ent
 
 Determinism: `torch`, `numpy`, `random` seeded from `training.seed`; `torch.use_deterministic_algorithms(True, warn_only=True)`; `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Single-worker DataLoader with `worker_init_fn` seeding is the default.
 
-W&B logs training loss, LR, grad norm, and throughput every step. Every eval interval logs val NLL, top-1, top-3, ECE, Brier, RPS, entropy, directional accuracy, a reliability diagram, and predicted distributions on fixed diagnostic timestamps (2023-03-13 FOMC, 2023-08-10 CPI).
+The SDD JSONL trace records training loss, LR, grad norm, and throughput at every step via `TRAINING_STEP_COMPLETED`. Every eval interval records val NLL, top-1, top-3, ECE, Brier, RPS, entropy, directional accuracy via `CHECKPOINT_WRITTEN`, plus a reliability diagram and predicted distributions on fixed diagnostic timestamps (2023-03-13 FOMC, 2023-08-10 CPI) written to `artifacts/{run_id}/` as PNG.
 
 ---
 
@@ -570,7 +570,7 @@ The test period opens exactly three times over the life of v1 — a budget enfor
 
 **Prediction metrics.** Cross-entropy in bits/token (this is what checkpoint selection reads), top-1 and top-3 bucket accuracy, per-bar distribution entropy (diagnostic; sharper is not always better), Brier score, and ranked probability score. RPS is reported because the vocabulary is ordinal — predicting bucket 15 when the truth is 16 should score better than predicting bucket 0, and CE alone does not capture that.
 
-**Calibration.** Expected calibration error with 15 confidence bins on the argmax probability, plus a reliability diagram uploaded to W&B each eval. Directional calibration is the one the trading layer actually eats — bin predicted `P(up)` into deciles and report realized up-frequency per decile.
+**Calibration.** Expected calibration error with 15 confidence bins on the argmax probability, plus a reliability diagram written to `artifacts/{run_id}/reliability.png` each eval. Directional calibration is the one the trading layer actually eats — bin predicted `P(up)` into deciles and report realized up-frequency per decile.
 
 **Signal quality.** Directional accuracy is the sign of `sum(p * bucket_train_mean)` vs. realized sign. Rank IC is Spearman correlation between predicted expected return and realized return over the eval window.
 
@@ -736,7 +736,7 @@ Each run writes its resolved config to `artifacts/{run_id}/config.yaml`. Reprodu
 
 ## 13. Experiment tracking
 
-W&B project `price-space-llm`. Each run logs the resolved config as metadata, `git rev-parse HEAD`, the dirty flag, the SHA256 of the tokenized dataset, the SHA256 of `channel_coverage.json`, per-step scalars, per-eval metrics from §10, and predicted-distribution bar charts on fixed diagnostic bars.
+Every training run writes its SDD JSONL trace to `logs/{run_id}/signals.jsonl` and its artifact bundle to `artifacts/{run_id}/`. The trace records the resolved config's sha256, `git rev-parse HEAD`, the SHA256 of the tokenized dataset, the SHA256 of `channel_coverage.json`, per-step scalars via `TRAINING_STEP_COMPLETED`, per-eval metrics from §10 via `CHECKPOINT_WRITTEN`, and predicted-distribution bar charts on fixed diagnostic bars written to `artifacts/{run_id}/predictions/` as PNG.
 
 `experiments/logbook.csv` is append-only, one row per run:
 
@@ -746,7 +746,7 @@ head_type,n_buckets,train_loss,val_nll,val_ece,val_brier,val_rps,val_dir_acc,
 held_out_sharpe,held_out_sharpe_se,lambda_risk,alpha_mag_weight,touched_test
 ```
 
-`scripts/register_run.py` writes the row from W&B run metadata at the end of training.
+`scripts/register_run.py` writes the row from the SDD JSONL trace metadata at the end of training.
 
 **Structural enforcement of the 3-look budget.** `scripts/check_test_look.sh` is a pre-commit hook. It fails any commit whose changed config files contain dates on or after `2024-01-01` unless the commit message includes the literal token `[test-look]`. Every `[test-look]` commit is appended to `experiments/test_looks.log`. The budget is three lines in that file for the whole MVP.
 
@@ -820,12 +820,12 @@ Integration lives at `tests/integration/test_end_to_end.py`. It runs the full pi
 | DataFrames | Polars 1.x | 5–20× pandas on Parquet joins; `join_asof` on `known_at` runs in ~1s |
 | Parquet I/O | pyarrow | Native to Polars |
 | Config | Hydra + Pydantic v2 | Composable YAML plus typed validation |
-| Tracking | Weights & Biases | Free tier suffices |
+| Tracking | SDD JSONL trace + matplotlib | Local files; no third-party service |
 | Testing | pytest | Parametrize-heavy for tokenizer, normalizer, `known_at`, staleness tests |
 | Dependency mgmt | uv | Fast resolves, lockfile-first |
 | Compute | Lambda Labs A10/A100 | Cheapest hourly for the GPU class |
 | Storage | Local NVMe + S3/GCS mirror | Fast local, cheap cold backup |
-| Plotting | matplotlib + W&B charts | matplotlib for saved figures, W&B for live |
+| Plotting | matplotlib | Saved figures under `artifacts/{run_id}/` |
 | Numerics | numpy 2.x | Pre-tensor arithmetic |
 | Stats | statsmodels | Robust SE on kappa; block bootstrap on Sharpe |
 

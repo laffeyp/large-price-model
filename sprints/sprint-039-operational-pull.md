@@ -117,7 +117,7 @@ Storage discipline invariant (Sprint 036) held over a real pull:
 
 **What landed.** The full corpus the model will train on. Real prices, real vol, real bucket distribution, real train/test drift. All artifacts versioned and hashed per Sprint 036. Zero code change — the sprint is data + configuration + verification, nothing more.
 
-**What did not land.** No test-window tokenization (needs `apply_bucketizer` step; deferred). No trainer touched. No cost calibration re-run on full window (currently smoked on 3 months). No baselines. No evaluation. No W&B. No GPU. The tech-arch's model-size sweep, context-length sweep, and four architecture ablations all wait for a remote training environment.
+**What did not land.** No test-window tokenization (needs `apply_bucketizer` step; deferred). No trainer touched. No cost calibration re-run on full window (currently smoked on 3 months). No baselines. No evaluation. No GPU. The tech-arch's model-size sweep, context-length sweep, and four architecture ablations all wait for a remote training environment.
 
 **What surfaced during execution.** Feature failure rate on the training window: 14,682 failures across 419,414 emissions (3.5%). Higher than the three-month smoke (525 / 12,995 = 4.0%) but scaled by the length of the constant-VIX runs. Failures are `rolling_std_20 == 0 → z-score undefined` on flat-VIX segments — real behavior of a daily channel aligned to 15-min bars, not a defect.
 
@@ -150,4 +150,4 @@ Storage discipline invariant (Sprint 036) held over a real pull:
 
 ## close (2026-08-13)
 
-Landed. 54,210 training tokens fit on 2015-01-05 through 2022-12-30. 10,166 test features ready for `apply_bucketizer`. 116 cache entries with full provenance. Zero code change. Sprint 040 (W&B wiring + local trainer smoke on real tokens) proceeds.
+Landed. 54,210 training tokens fit on 2015-01-05 through 2022-12-30. 10,166 test features ready for `apply_bucketizer`. 116 cache entries with full provenance. Zero code change. Next sprint proceeds against a hardened storage layer + full corpus.

@@ -170,16 +170,12 @@ Normalisation the fetcher owns:
 
 - `join_asof` on `known_at` is the primitive. To fill: exact keyword surface (`by=`, `strategy='backward'`, tolerance semantics) on first use.
 
-### Weights & Biases
+### Run tracking
 
-- Dep pin: `wandb>=0.18` (Sprint 040 landed with 0.28.2). Path (b) adoption per bridge-mapping discipline — stable public API, dep pin + notes on the sprint card, no halt required.
-- Actual surface used, as of 0.28.2:
-  - `wandb.init(project: str, name: str, config: dict, mode: "online"|"offline"|"disabled", dir: str) -> wandb.sdk.wandb_run.Run`. Returns a Run with `.id`, `.dir` (a `files/` subdir under `dir/wandb/offline-run-{timestamp}-{id}/`).
-  - `wandb.log(data: dict[str, float|int], step: int)` streams scalars.
-  - `wandb.finish()` flushes summary and closes the run.
-  - `wandb.errors.{Error, CommError, AuthenticationError, UsageError}` — every exception the trainer catches wraps into a `WANDB_UPLOAD_FAILED` emit.
-- Project name: `price-space-llm`. Run name: the trainer's `run_id`. Config: model + trainer config as a flat dict. `mode` selection: `WANDB_MODE=offline` for local smoke (no credential, writes to `wandb/` on disk); `WANDB_MODE=online` for real runs on rented GPU (needs `WANDB_API_KEY`).
-- `wandb.log` cadence: per training step (train_loss, lr, grad_norm) + per checkpoint (val_nll, val_ece, val_brier, val_rps, val_dir_acc, val_top1, val_top3). Matches the fields on `TRAINING_STEP_COMPLETED` and `CHECKPOINT_WRITTEN`.
+- Local files only. No hosted experiment-tracking service, no third-party dashboard, no accounts. Ratified 2026-08-13 by the Architect: hosted trackers like Weights & Biases read as advertising and are not used by this project.
+- The SDD JSONL trace at `logs/{run_id}/signals.jsonl` is the authoritative log for every training run. `TRAINING_STEP_COMPLETED` records per-step scalars (train_loss, lr, grad_norm, throughput_tokens_per_sec). `CHECKPOINT_WRITTEN` records per-checkpoint val metrics (val_nll, val_ece, val_brier, val_rps, val_dir_acc, val_top1, val_top3).
+- `scripts/plot_run.py` (to be written) reads a trace and writes loss curves + metric tables to `artifacts/{run_id}/` as PNG + HTML.
+- Vocabulary v0.4 (2026-08-13) removes the `WANDB_UPLOAD_FAILED` tag as part of the retraction.
 
 Every bridge mapping above is a stub. First sprint that imports the SDK halts with `bridge_mapping_required` if the actual surface is not documented here at that time. That halt is a feature — it forces us to read the SDK before writing against it, per soundfield's round 13/20-26 origin (Addendum C, external-SDK reverse-engineer-first).
 
@@ -219,7 +215,7 @@ The project has no UI. The observation contract for a sprint replaces "boot simu
 - **Expected runtime signals** in the JSONL trace at `logs/{run_id}/signals.jsonl` (schema per `signals/0.1.json`).
 - **Expected log substrings** in stderr from the pipeline script.
 - **Expected metric artifacts** (JSON files under `artifacts/{run_id}/`) with named keys and value ranges.
-- **Expected W&B log lines** where a metric passes through W&B.
+- **Expected PNG or HTML plots** under `artifacts/{run_id}/` when a sprint generates one.
 - **Expected exit code** from the driving script.
 
 The Architect (or CI) verifies by `grep` on the trace file and by JSON-schema check on the metrics artifact.
@@ -303,4 +299,4 @@ Filled in as the project surfaces them. First candidates:
 
 ---
 
-*WORKING_AGREEMENT.md — Price-Space LLM. Data science / ML training class + CLI class. Strict validator extras. Bridge mappings for PyTorch, the Alpha-Vantage MCP, Hydra, Pydantic, Polars, W&B — stubs filled in on first use. Canonical home registry seeded from tech-arch §15. Six phases planned; Vocabulary Session is Sprint 0.*
+*WORKING_AGREEMENT.md — Price-Space LLM. Data science / ML training class + CLI class. Strict validator extras. Bridge mappings for PyTorch, the Alpha-Vantage MCP, Hydra, Pydantic, Polars — stubs filled in on first use. Run tracking is local JSONL + matplotlib; no hosted trackers. Canonical home registry seeded from tech-arch §15. Six phases planned; Vocabulary Session is Sprint 0.*

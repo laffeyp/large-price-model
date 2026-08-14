@@ -21,7 +21,7 @@ determinism_budget: bit-deterministic
 Fixes landed in this sprint:
 1. `config_hash` was hashing the data instead of the config across `scripts/{train,baselines,bucketize,features}.py` — silent reproducibility break. All four fixed to `hashlib.sha256(args.config.read_bytes()).hexdigest()`.
 2. `WINDOW_SAMPLED.start_position` was `int(step)` — a dishonest proxy. `WindowSampler.sample()` now returns real starts on `WindowBatch.starts`, and the trainer emits `batch.starts[0]` (the first-batch window's start position in the token stream).
-3. `EPOCH_COMPLETED.epoch` was hard-coded to `1`. Now computes `ceil(tokens_consumed / len(train_tokens))` where `tokens_consumed = n_steps * batch_size * context_len`. For the 200-step W&B smoke this reports `epoch=3` instead of `epoch=1`; for a 300-step run it reports `epoch=4`.
+3. `EPOCH_COMPLETED.epoch` was hard-coded to `1`. Now computes `ceil(tokens_consumed / len(train_tokens))` where `tokens_consumed = n_steps * batch_size * context_len`. A 300-step run reports `epoch=4`.
 
 Surfaced to `BLACKBOARD § Surfaced` (seven new entries; verification notes on each):
 - Frozen normalizer missing AND normalization-drift diagnostic missing (§2.2 + product-spec line 251 addition surfaced by user).

@@ -4,6 +4,10 @@
 Emits the full training tag surface: WINDOW_SAMPLED per window,
 TRAINING_STEP_COMPLETED per step, CHECKPOINT_WRITTEN at every eval,
 EPOCH_COMPLETED at end, TRAINING_DIVERGED on NaN or grad-explosion.
+
+Every training scalar lands in the SDD JSONL trace at
+`logs/{run_id}/signals.jsonl`. That trace is the log; downstream plots
+read from it.
 """
 
 import argparse
@@ -21,7 +25,6 @@ from price_space_llm.model import (
 )
 from price_space_llm.model.trainer import TrainerConfig, TrainingDiverged
 from price_space_llm.script_harness import script_session
-from price_space_llm.wandb_sink import WandbConfig, WandbSink
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,23 +51,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--eval-every", type=int, default=25)
-    parser.add_argument(
-        "--wandb",
-        choices=("off", "offline", "online"),
-        default="off",
-        help="off = no W&B; offline = writes wandb/ locally; online needs WANDB_API_KEY.",
-    )
-    parser.add_argument(
-        "--wandb-project",
-        default="price-space-llm",
-        help="W&B project name; matches WORKING_AGREEMENT.md § Weights & Biases.",
-    )
-    parser.add_argument(
-        "--wandb-dir",
-        type=Path,
-        default=Path("wandb"),
-        help="On-disk root for W&B run directories (offline mode).",
-    )
     args = parser.parse_args(argv)
 
     if not args.tokens.exists():
@@ -118,51 +104,16 @@ def main(argv: list[str] | None = None) -> int:
             eval_every=args.eval_every,
             seed=args.seed,
         )
-        wandb_sink_context: WandbSink | None
-        if args.wandb == "off":
-            wandb_sink_context = None
-        else:
-            wandb_cfg = WandbConfig(
-                project=args.wandb_project,
-                run_name=run_id,
-                config={
-                    "vocab_size": model_cfg.vocab_size,
-                    "context_len": model_cfg.context_len,
-                    "d_model": model_cfg.d_model,
-                    "n_layers": model_cfg.n_layers,
-                    "n_heads": model_cfg.n_heads,
-                    "n_steps": trainer_cfg.n_steps,
-                    "batch_size": trainer_cfg.batch_size,
-                    "lr": trainer_cfg.lr,
-                    "eval_every": trainer_cfg.eval_every,
-                    "seed": trainer_cfg.seed,
-                },
-                mode="offline" if args.wandb == "offline" else "online",
-                dir=args.wandb_dir,
-            )
-            wandb_sink_context = WandbSink(wandb_cfg, emitter, run_id=run_id)
 
         try:
-            if wandb_sink_context is None:
-                result = run_training(
-                    tokens=tokens,
-                    trainer_cfg=trainer_cfg,
-                    model_cfg=model_cfg,
-                    emitter=emitter,
-                    run_id=run_id,
-                    checkpoint_dir=args.checkpoint_dir,
-                )
-            else:
-                with wandb_sink_context as sink:
-                    result = run_training(
-                        tokens=tokens,
-                        trainer_cfg=trainer_cfg,
-                        model_cfg=model_cfg,
-                        emitter=emitter,
-                        run_id=run_id,
-                        checkpoint_dir=args.checkpoint_dir,
-                        wandb_sink=sink,
-                    )
+            result = run_training(
+                tokens=tokens,
+                trainer_cfg=trainer_cfg,
+                model_cfg=model_cfg,
+                emitter=emitter,
+                run_id=run_id,
+                checkpoint_dir=args.checkpoint_dir,
+            )
         except TrainingDiverged as ex:
             print(f"train: diverged: {ex}", file=sys.stderr)
             return 2

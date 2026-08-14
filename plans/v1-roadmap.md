@@ -31,7 +31,7 @@ Concrete required subsystems, from tech-arch §§1-16 and product-spec §Success
 - `experiments/logbook.csv` append-only with one row per training run; `scripts/register_run.py` writes it.
 - `check_test_look.sh` pre-commit hook + filesystem guard on `data/aligned/*.parquet` for held-out reads.
 - No-hardcoded-target grep test + one-source-of-truth channel test.
-- W&B logs per-step scalars + per-eval metrics + reliability diagrams + predicted distributions on fixed diagnostic bars (2023-03-13 FOMC, 2023-08-10 CPI).
+- SDD JSONL trace records per-step scalars + per-eval metrics via `TRAINING_STEP_COMPLETED` and `CHECKPOINT_WRITTEN`. `scripts/plot_run.py` reads the trace and writes reliability diagrams + predicted distributions on fixed diagnostic bars (2023-03-13 FOMC, 2023-08-10 CPI) to `artifacts/{run_id}/` as PNG.
 
 Success gates (spec §Success gates for v1):
 - Val NLL ≥10% lower than linear.
@@ -47,7 +47,7 @@ Success gates (spec §Success gates for v1):
 
 ## 2. Built as of Sprint 041
 
-Ingestion, alignment, and cache land. Model, trainer, evaluator, cost calibration, baselines, W&B all exist in some form. Storage discipline holds. The corpus (54,262 aligned rows for 2015-2022, 10,166 for 2024-2025) sits on disk with content-hashed provenance.
+Ingestion, alignment, and cache land. Model, trainer, evaluator, cost calibration, baselines exist in some form. Storage discipline holds. The corpus (54,262 aligned rows for 2015-2022, 10,166 for 2024-2025) sits on disk with content-hashed provenance.
 
 Concretely built (sprint history in `BLACKBOARD.md § Built`):
 
@@ -56,12 +56,11 @@ Concretely built (sprint history in `BLACKBOARD.md § Built`):
 - `features/compute.py` (Sprint 026) computes `log_return`, `rolling_mean_20`, `rolling_std_20`, `rolling_z_score_20` per channel.
 - `tokenizer/bucketize.py` (Sprint 030) fits 32 quantile edges on the training partition, writes `bucket_stats.{run_id}.json` with `edges` + `training_range_start` + `training_range_end` (no `bucket_lower/upper/train_mean/train_median/train_frequency`).
 - `model/transformer.py::PriceSpaceLLM` (Sprint 031) is a causal decoder with `nn.Embedding(vocab_size, d_model)` input on `tokens: Tensor(B,T)` of bucket-ids. Learned absolute positional embedding, not RoPE. `torch.optim.Adam`, no schedule.
-- `model/trainer.py::run_training` (Sprint 031, 032, 040, 041) fires the full training tag surface; val metrics via `compute_metric_set`; W&B sink optional; `WINDOW_SAMPLED.start_position` carries real starts; `EPOCH_COMPLETED.epoch` is `ceil(tokens_consumed / train_tokens)`.
+- `model/trainer.py::run_training` (Sprint 031, 032, 041) fires the full training tag surface; val metrics via `compute_metric_set`; `WINDOW_SAMPLED.start_position` carries real starts; `EPOCH_COMPLETED.epoch` is `ceil(tokens_consumed / train_tokens)`.
 - `evaluation/{metrics,regimes,evaluate}.py` (Sprint 032) computes 7 metrics; regimes bucket by SPY `rolling_std_20` (VIX substitute — stale since Sprint 038 landed real VIX).
 - `baselines.py` (Sprint 033) ships `LinearBaseline`, `TargetOnlyBaseline` (marginal-frequency predictor — wrong shape per spec), `fit_linear` with `magnitude_weighted` variant.
 - `cost_calibration/{spread,kappa}.py` (Sprint 035) fits spread scaler + Kyle's-lambda kappa on a 3-month smoke.
 - `testlook.py` (Sprint 034) enforces 3-look budget via JSONL log. Not wired into any evaluation script.
-- `wandb_sink.py` (Sprint 040) wraps init/log/finish; failure emits `WANDB_UPLOAD_FAILED`.
 - Storage discipline (Sprint 036): versioned artifacts + `.sha256` sidecars + `.latest` symlinks; cache sidecars + append-only index + per-tool freshness policy.
 - Operational corpus (Sprint 039): 96 SPY monthly caches (2015-01 through 2022-12) + 18 monthly caches (2024-01 through 2025-06) + 1 VIX INDEX_DATA (1990 through today) = 116 cache_index rows. Aligned + features + tokens on disk for both windows.
 - Fixes from Sprint 041: `config_hash` distinct from `data_hash` across 4 CLIs; `WINDOW_SAMPLED.start_position` real; `EPOCH_COMPLETED.epoch` real.
@@ -256,7 +255,7 @@ Ordering respects dependencies: data before features before model before trainin
 
 | # | Scope | Depends on | GPU |
 |---|---|---|---|
-| 083 | Provision AWS GPU (g5.xlarge with A10 for cheap dev, p4d for A100 production sweep points). Sync tokenized parquet + normalizers + bucket_stats + code via git + S3. Verify one end-to-end training run at xs=1M matches local CPU numbers within numerical noise. First `WANDB_MODE=online` run; requires WANDB_API_KEY in `.env`. | 060, 063 | **yes** |
+| 083 | Provision AWS GPU (g5.xlarge with A10 for cheap dev, p4d for A100 production sweep points). Sync tokenized parquet + normalizers + bucket_stats + code via git + S3. Verify one end-to-end training run at xs=1M matches local CPU numbers within numerical noise. Trace lands at `logs/{run_id}/signals.jsonl`; `scripts/plot_run.py` writes loss curves to `artifacts/{run_id}/`. | 060, 063 | **yes** |
 | 084 | Model-size sweep: 4 runs at xs/sm/md/lg on rented A10 or A100. Log to `experiments/logbook.csv`. Report validation NLL/ECE/Brier/RPS curves. | 083 | **yes** |
 | 085 | Context-length sweep at winning model size from Sprint 084: 4 runs at 64/128/256/512. | 084 | **yes** |
 | 086 | Baseline ladder (5 runs): linear, MLP (064), GRU (065), transformer at winning config (084 result), target-only ablation (066), magnitude-weighted ablation. | 064, 065, 066, 085 | **yes** |
@@ -289,7 +288,7 @@ Total: 48 sprints from Sprint 042 through Sprint 090 (some parallelizable within
 **What this plan does not yet resolve.**
 
 - **GPU rental.** Decided 2026-08-13: AWS. Sprint 083 rents an EC2 GPU instance (g5.xlarge for A10 dev at ~$1/hr; p4d.24xlarge or similar for A100 production sweep points).
-- **Weights & Biases account.** W&B is a website that stores each training run's loss curves and validation metrics. Sprint 040 wrote the code that uploads to it; the code works in offline mode without an account. To run online (Sprint 083 onward), someone needs a W&B account, its API key pasted into `.env` as `WANDB_API_KEY=...`, and a project name (default `price-space-llm`). Free tier is enough for v1.
+- **Run tracking.** Resolved 2026-08-13: local files only. The SDD JSONL trace at `logs/{run_id}/signals.jsonl` is the authoritative log. `scripts/plot_run.py` reads the trace and writes loss curves + metric tables to `artifacts/{run_id}/` as PNG. No hosted tracker, no third-party account, no credential.
 - **Historical SPY spread data for cost calibration** (Sprint 073). The simulator's cost model subtracts a transaction cost from every simulated trade. That cost is half of the spread between the buy price and sell price on SPY at the trade instant. Sprint 035 pulled today's live spread from Alpha-Vantage for 3 months of 2024 and fit a scaler. To recalibrate against the full 2015-2022 training window, we need historical spread data from that period. Alpha-Vantage does not sell it. Three paths: (a) buy 8 years of SPY historical BBO from Databento (~$100-500), (b) drop ground-truth calibration and estimate spread from bar high/low ranges only via the Corwin-Schultz formula the spec names as a fallback, (c) apply Sprint 035's 2024 coefficient to the training window and assume spread dynamics did not shift across 8 years. Path (a) is the honest one; path (c) is the fastest and weakest.
 
 **Revision policy.** Each sprint closes with its normal card + BLACKBOARD entry. If a sprint surfaces a new gap not in this plan, the plan gets amended in the same commit that files the gap. This document tracks the whole build; sprint cards track each build step.

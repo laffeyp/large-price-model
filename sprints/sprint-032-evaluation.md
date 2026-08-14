@@ -26,7 +26,7 @@ Build the offline evaluator. Reads a Sprint 031 checkpoint, reconstructs the mod
 
 **3. Hard rule 6 stretch.** Four code files (`__init__.py`, `metrics.py`, `regimes.py`, `evaluate.py`) + CLI + two test files. Same class of stretch as Sprint 031 -- one delivery, one smoke, inseparable.
 
-**4. Baselines + W&B deferred.** `BASELINE_COMPARISON_ASSESSED` needs a second run (linear / mlp / gru_tcn) -- Sprint 033 candidate. `WANDB_UPLOAD_FAILED` needs W&B integration -- later. Both filed as adjacent scope, not this sprint.
+**4. Baselines deferred.** `BASELINE_COMPARISON_ASSESSED` needs a second run (linear / mlp / gru_tcn) -- Sprint 033 candidate. Filed as adjacent scope, not this sprint.
 
 ---
 

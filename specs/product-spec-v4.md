@@ -91,7 +91,7 @@ Windows are sampled uniformly at random from the training range rather than enum
 
 Magnitude-weighted cross-entropy is one of the required ablations. Loss is unweighted cross-entropy for the main run.
 
-**Training infrastructure.** Single A10 or A100 GPU. Mixed precision (bfloat16). AdamW, learning rate 3e-4 with cosine schedule and 2000-step warmup, weight decay 0.1, gradient clipping at 1.0. Batch size fills GPU memory. W&B logs training loss and validation NLL, ECE, Brier, ranked probability score, and top-3 accuracy at fixed step intervals.
+**Training infrastructure.** Single A10 or A100 GPU on AWS. Mixed precision (bfloat16). AdamW, learning rate 3e-4 with cosine schedule and 2000-step warmup, weight decay 0.1, gradient clipping at 1.0. Batch size fills GPU memory. The SDD JSONL trace at `logs/{run_id}/signals.jsonl` records training loss and validation NLL, ECE, Brier, ranked probability score, and top-3 accuracy at fixed step intervals via `TRAINING_STEP_COMPLETED` and `CHECKPOINT_WRITTEN` emissions. `scripts/plot_run.py` reads that trace and writes loss curves and metric tables to `artifacts/{run_id}/`.
 
 Checkpoints are selected by **validation NLL**, not ECE. ECE, Brier, and RPS are logged and reported per run but do not gate selection. The reason is straightforward: a model can lower ECE while losing information — a predictor that spreads probability more evenly across buckets looks better calibrated but carries less signal, and the decision layer is starved by the flatter distribution. NLL penalizes both miscalibration and information loss and is the objective the model is trained on; using it for selection avoids the second-order failure where the selection metric fights the training loss.
 
@@ -158,7 +158,7 @@ v1 succeeds if all of the following hold on the held-out test period (2024-01 th
 - Block-bootstrap distribution of Sharpe across monthly blocks of the holdout, reported as a histogram. Gate: ≥70% of block-bootstrap Sharpes positive.
 - Held-out capacity at least $1M — the largest single-position size at which Sharpe stays positive.
 - The simulator's spread proxy is calibrated against measured BBO data on the training window before the held-out set is opened. The slippage coefficient `kappa` is estimated by regression on the training window with a reported confidence interval, and the held-out Sharpe report includes a sensitivity plot showing Sharpe as `kappa` moves from 0.5x to 2x its point estimate.
-- Every training run has its config, git SHA, data hash, and W&B URL logged in `experiments/logbook.csv`. Any run that touched the held-out test set is flagged. Test-set look budget: 3 for the full v1, enforced by the filesystem guard above.
+- Every training run has its config, git SHA, data hash, and trace path logged in `experiments/logbook.csv`. Any run that touched the held-out test set is flagged. Test-set look budget: 3 for the full v1, enforced by the filesystem guard above.
 
 **Reported, not gated.** Range of held-out Sharpe across 3 seeds.
 
@@ -228,7 +228,7 @@ Fallback: Polygon.io for 15-minute equity bars if the MCP does not return the fr
 
 **Storage.** Local SSD, ~50GB for aligned Parquet + tokenized cache + all checkpoints.
 
-**Software.** Python 3.11, PyTorch 2.x, Polars for DataFrames, PyArrow for Parquet, Hydra + Pydantic v2 for typed configs, Weights & Biases for tracking, pytest for tests, `uv` for dependency management.
+**Software.** Python 3.11, PyTorch 2.x, Polars for DataFrames, PyArrow for Parquet, Hydra + Pydantic v2 for typed configs, SDD JSONL trace + matplotlib for run tracking, pytest for tests, `uv` for dependency management.
 
 ## Risks and mitigations
 
