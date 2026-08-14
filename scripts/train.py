@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         "--wandb",
         choices=("off", "offline", "online"),
         default="off",
-        help="off = no W&B; offline = writes wandb/ locally, no network; online = requires WANDB_API_KEY.",
+        help="off = no W&B; offline = writes wandb/ locally; online needs WANDB_API_KEY.",
     )
     parser.add_argument(
         "--wandb-project",
@@ -72,9 +72,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     run_id = f"train-{args.tokens.stem}-s{args.n_steps}-{args.seed:016d}"
-    tokens_bytes = args.tokens.read_bytes()
-    config_hash = hashlib.sha256(tokens_bytes).hexdigest()
-    data_hash = hashlib.sha256(tokens_bytes).hexdigest()
+    # Sprint 041: config_hash keyed to the resolved experiment config file; data_hash
+    # keyed to the tokens parquet. Previously both hashed tokens_bytes -- silently
+    # broke reproducibility across configs with the same input.
+    if not args.config.exists():
+        print(f"train: config not found: {args.config}", file=sys.stderr)
+        return 1
+    config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
+    data_hash = hashlib.sha256(args.tokens.read_bytes()).hexdigest()
 
     result = None
     with script_session(

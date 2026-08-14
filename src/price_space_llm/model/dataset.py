@@ -24,6 +24,9 @@ from torch import Tensor
 class WindowBatch:
     inputs: Tensor  # (B, T) int64
     targets: Tensor  # (B, T) int64 -- inputs shifted by 1
+    starts: tuple[
+        int, ...
+    ]  # Sprint 041: real start positions per batch entry, in token-stream index.
 
 
 def load_tokens(tokens_path: Path, target_symbol: str) -> list[int]:
@@ -69,7 +72,8 @@ class WindowSampler:
         targets = torch.stack(
             [self._tokens[s + 1 : s + 1 + self._context_len] for s in starts]
         )  # (B, T)
-        return WindowBatch(inputs=inputs, targets=targets)
+        starts_tuple = tuple(int(x) for x in starts.tolist())
+        return WindowBatch(inputs=inputs, targets=targets, starts=starts_tuple)
 
     def n_valid_starts(self) -> int:
         return self._max_start + 1

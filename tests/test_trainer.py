@@ -227,6 +227,50 @@ def test_run_training_survives_wandb_log_failure(tmp_path: Path):
     assert result.final_step == 4
 
 
+def test_window_sampled_start_position_is_a_real_start(tmp_path: Path):
+    """Sprint 041 §4.1: WINDOW_SAMPLED.start_position carries a real token-stream index
+    (the first-batch entry's start), not the training step number.
+    """
+    e = _fresh_emitter()
+    tokens = _synthetic_tokens(800)
+    run_training(
+        tokens=tokens,
+        trainer_cfg=_small_trainer_cfg(n_steps=5, eval_every=10),
+        model_cfg=_small_model_cfg(),
+        emitter=e,
+        run_id="test-start",
+        checkpoint_dir=tmp_path / "ckpt",
+    )
+    windows = [s for s in e.snapshot() if s.tag == "WINDOW_SAMPLED"]
+    assert len(windows) == 5
+    max_valid_start = len(tokens) - _small_model_cfg().context_len - 1
+    for w in windows:
+        start = int(w.payload["start_position"])
+        assert 0 <= start <= max_valid_start
+    # Distinct starts across steps (probabilistic on random sampler, but 5 draws from
+    # a 735-wide space collide only ~1.4% of the time; failure = seed change).
+    starts = [int(w.payload["start_position"]) for w in windows]
+    assert len(set(starts)) >= 4  # allow one duplicate at the tail
+
+
+def test_epoch_completed_reports_effective_epoch(tmp_path: Path):
+    """Sprint 041 §4.2: EPOCH_COMPLETED.epoch = ceil(tokens_consumed / train_tokens).
+    Small smoke: 800 tokens, train_frac 0.8 -> 640 train tokens; batch 4 * context 64
+    per step = 256 tokens/step; 10 steps = 2560 tokens; ceil(2560/640) = 4.
+    """
+    e = _fresh_emitter()
+    run_training(
+        tokens=_synthetic_tokens(800),
+        trainer_cfg=_small_trainer_cfg(n_steps=10, eval_every=20),
+        model_cfg=_small_model_cfg(),
+        emitter=e,
+        run_id="test-epoch",
+        checkpoint_dir=tmp_path / "ckpt",
+    )
+    ec = next(s for s in e.snapshot() if s.tag == "EPOCH_COMPLETED")
+    assert ec.payload["epoch"] == 4
+
+
 def test_run_training_is_deterministic_with_seed(tmp_path: Path):
     """Same seed → same final train loss."""
     e1 = _fresh_emitter()

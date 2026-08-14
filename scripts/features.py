@@ -46,9 +46,9 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id = f"features-{args.aligned.stem}-{args.seed:016d}"
     output_path = args.output_dir / f"{run_id}.parquet"
-    aligned_bytes = args.aligned.read_bytes()
-    config_hash = hashlib.sha256(aligned_bytes).hexdigest()
-    data_hash = hashlib.sha256(aligned_bytes).hexdigest()
+    # Sprint 041: config_hash keyed to the experiment config; data_hash to the aligned parquet.
+    config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
+    data_hash = hashlib.sha256(args.aligned.read_bytes()).hexdigest()
 
     result = None
     with script_session(

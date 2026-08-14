@@ -60,9 +60,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     run_id = f"baselines-{args.tokens.stem}-{args.seed:016d}"
-    tokens_bytes = args.tokens.read_bytes()
-    config_hash = hashlib.sha256(tokens_bytes).hexdigest()
-    data_hash = hashlib.sha256(tokens_bytes).hexdigest()
+    # Sprint 041: config_hash keyed to the experiment config; data_hash to tokens.
+    config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
+    data_hash = hashlib.sha256(args.tokens.read_bytes()).hexdigest()
 
     results = []
     with script_session(

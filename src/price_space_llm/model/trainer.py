@@ -160,10 +160,13 @@ def run_training(
     for step in range(1, trainer_cfg.n_steps + 1):
         step_t0 = time.monotonic()
         batch: WindowBatch = train_sampler.sample()
+        # Sprint 041: emit the first-batch start position from the sampler, per prior review §4.1.
+        # Payload documents this as "first window in the batch"; other batch entries carry
+        # different starts, uploaded to W&B only at the sink layer per Sprint 040.
         emitter.emit(
             "WINDOW_SAMPLED",
             run_id=run_id,
-            start_position=int(step),  # deterministic proxy; sampler returns starts per-batch
+            start_position=int(batch.starts[0]),
             context_len=str(model_cfg.context_len),
         )
         logits = model(batch.inputs)
@@ -270,10 +273,16 @@ def run_training(
                 wandb_sink.log_checkpoint(step, ckpt_path, dict(metrics))
             n_checkpoints += 1
 
+    # Sprint 041: real effective-epoch count = ceil(tokens_consumed / tokens_per_epoch).
+    # Random-window sampling has no natural epoch boundary; the effective count is how
+    # many times the training corpus was passed over in expectation.
+    tokens_consumed = n_steps_done * trainer_cfg.batch_size * model_cfg.context_len
+    tokens_per_epoch = max(len(train_tokens), 1)
+    effective_epoch = max(1, math.ceil(tokens_consumed / tokens_per_epoch))
     emitter.emit(
         "EPOCH_COMPLETED",
         run_id=run_id,
-        epoch=1,
+        epoch=effective_epoch,
         mean_train_loss=total_train_loss / max(n_steps_done, 1),
         n_steps=n_steps_done,
     )
