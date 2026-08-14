@@ -55,7 +55,12 @@ def load_channel_bars(
 ) -> pl.DataFrame:
     """Read a cached raw response and return a normalised bar DataFrame.
 
-    Columns: `known_at: datetime[UTC]`, `close: float`, `channel: str`, `symbol: str`.
+    Columns: `known_at: datetime[UTC]`, `open`, `high`, `low`, `close`,
+    `volume` (float64/int64), `channel: str`, `symbol: str`. Sprint 042
+    kept the full OHLCV row so downstream feature computation (bar_shape,
+    range_pct, volume_z_100, dollar_volume, spread_proxy per spec §6)
+    reads real quantities rather than close-only.
+
     Uses the SAME fixed EST offset as `alphavantage.py` so the alignment
     grid and the bar timestamps live on the same (biased) clock.
     """
@@ -76,11 +81,14 @@ def load_channel_bars(
         bar_time_utc = naive.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
         # known_at is bar_close + 1 minute per Sprint 024's convention.
         known_at = bar_time_utc + timedelta(minutes=1)
-        close = float(bar.get("4. close", bar.get("close", "0")))
         rows.append(
             {
                 "known_at": known_at,
-                "close": close,
+                "open": float(bar.get("1. open", bar.get("open", "0"))),
+                "high": float(bar.get("2. high", bar.get("high", "0"))),
+                "low": float(bar.get("3. low", bar.get("low", "0"))),
+                "close": float(bar.get("4. close", bar.get("close", "0"))),
+                "volume": int(float(bar.get("5. volume", bar.get("volume", "0")))),
                 "channel": channel,
                 "symbol": symbol,
             }
@@ -130,11 +138,15 @@ def load_index_daily_bars(
         naive_close = datetime.strptime(f"{date_str} 16:00:00", "%Y-%m-%d %H:%M:%S")
         close_utc = naive_close.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
         known_at = close_utc + timedelta(minutes=1)
-        close = float(row.get("close", "0"))
+        # INDEX_DATA carries OHLC per day; no volume field on the endpoint.
         rows.append(
             {
                 "known_at": known_at,
-                "close": close,
+                "open": float(row.get("open", "0")),
+                "high": float(row.get("high", "0")),
+                "low": float(row.get("low", "0")),
+                "close": float(row.get("close", "0")),
+                "volume": 0,
                 "channel": channel,
                 "symbol": symbol,
             }
@@ -172,6 +184,9 @@ def build_rth_grid(start: date, end: date) -> pl.DataFrame:
     return pl.DataFrame({"grid_ts": all_days})
 
 
+_OHLCV_FIELDS = ("open", "high", "low", "close", "volume")
+
+
 def align_channels(
     grid: pl.DataFrame,
     channel_bars: dict[str, pl.DataFrame],
@@ -179,13 +194,19 @@ def align_channels(
 ) -> pl.DataFrame:
     """Join each channel into the grid via `join_asof(strategy=backward)`.
 
-    Returns a wide DataFrame: `grid_ts`, plus per-channel columns
-    `{channel}__{symbol}__close` and `{channel}__{symbol}__known_at`.
+    Returns a wide DataFrame with, per channel `{key}`:
+    - `{key}__open`, `{key}__high`, `{key}__low`, `{key}__close`, `{key}__volume`
+    - `{key}__known_at`
+    - `missing_mask__{key}` (bool: true iff the as-of join found no eligible row)
+    - `age_since_known_at__{key}` (int32: number of 15-min bars since the last
+      observation was known; 0 on a fresh observation; 0 while the mask is true)
+    - `observed_at_this_grid_step__{key}` (bool: true iff the picked bar's
+      known_at differs from the previous grid step's picked known_at)
 
-    Emits one `ALIGNMENT_ROW_EMITTED` per grid row with
-    `missing_channels_count` (the count of channels whose `close` is null
-    for that row). Emits one `AS_OF_JOIN_MISS` per (channel, grid_ts) with
-    a null `close`, reason `no_history_yet`.
+    Emits one `ALIGNMENT_ROW_EMITTED` per grid row with `missing_channels_count`
+    (the count of channels whose `close` is null for that row). Emits one
+    `AS_OF_JOIN_MISS` per (channel, grid_ts) with a null `close`, reason
+    `no_history_yet`.
     """
     aligned = grid
     channel_col_map: dict[str, tuple[str, str, str]] = {}
@@ -193,18 +214,55 @@ def align_channels(
     for key, bars in channel_bars.items():
         # `key` is "channel__symbol" per the manifest convention.
         channel_name, symbol_name = key.split("__", 1)
-        close_col = f"{key}__close"
         known_col = f"{key}__known_at"
-        renamed = bars.rename({"close": close_col, "known_at": known_col}).select(
-            [known_col, close_col]
-        )
+        rename_map: dict[str, str] = {"known_at": known_col}
+        for f in _OHLCV_FIELDS:
+            if f in bars.columns:
+                rename_map[f] = f"{key}__{f}"
+        renamed = bars.rename(rename_map).select(list(rename_map.values()))
         aligned = aligned.join_asof(
             renamed,
             left_on="grid_ts",
             right_on=known_col,
             strategy="backward",
         )
-        channel_col_map[key] = (close_col, channel_name, symbol_name)
+        channel_col_map[key] = (f"{key}__close", channel_name, symbol_name)
+
+    # Sprint 042: staleness columns per channel — missing_mask,
+    # observed_at_this_grid_step, age_since_known_at (spec §5).
+    for key in channel_bars:
+        close_col = f"{key}__close"
+        known_col = f"{key}__known_at"
+
+        close_null = aligned[close_col].is_null().to_list()
+        known_at = aligned[known_col].to_list()
+
+        missing_mask: list[bool] = [bool(v) for v in close_null]
+        observed: list[bool] = []
+        age: list[int] = []
+
+        prev_known: Any = None
+        age_counter = 0
+        for ka, is_missing in zip(known_at, close_null, strict=True):
+            if is_missing:
+                observed.append(False)
+                age.append(0)
+                prev_known = None
+                age_counter = 0
+                continue
+            is_fresh = ka != prev_known
+            observed.append(bool(is_fresh))
+            if is_fresh:
+                age_counter = 0
+            age.append(age_counter)
+            age_counter += 1
+            prev_known = ka
+
+        aligned = aligned.with_columns(
+            pl.Series(f"missing_mask__{key}", missing_mask, dtype=pl.Boolean),
+            pl.Series(f"observed_at_this_grid_step__{key}", observed, dtype=pl.Boolean),
+            pl.Series(f"age_since_known_at__{key}", age, dtype=pl.Int32),
+        )
 
     # Emit per-row and per-miss signals.
     close_cols = [close_col for (close_col, _, _) in channel_col_map.values()]

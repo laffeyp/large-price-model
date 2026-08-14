@@ -116,8 +116,144 @@ def test_load_channel_bars_parses_cache(tmp_path: Path):
         },
     )
     assert df.height == 2
-    assert set(df.columns) == {"known_at", "close", "channel", "symbol"}
+    # Sprint 042: bars carry full OHLCV, not close-only, so downstream features can read them.
+    assert set(df.columns) == {
+        "known_at",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "channel",
+        "symbol",
+    }
     assert df["close"].to_list() == [540.0, 541.0]
+
+
+def test_align_channels_emits_ohlcv_columns_per_channel():
+    """Sprint 042 §5: aligned parquet carries {open, high, low, close, volume} per channel."""
+    e = _fresh_emitter()
+    grid = pl.DataFrame(
+        {
+            "grid_ts": [
+                datetime.fromisoformat("2024-06-03T14:45:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:00:00+00:00"),
+            ]
+        }
+    )
+    bars = pl.DataFrame(
+        {
+            "known_at": [datetime.fromisoformat("2024-06-03T14:31:00+00:00")],
+            "open": [539.5],
+            "high": [540.5],
+            "low": [539.0],
+            "close": [540.0],
+            "volume": [1000000],
+            "channel": ["target"],
+            "symbol": ["SPY"],
+        }
+    )
+    aligned = align_channels(grid, {"target__SPY": bars}, e)
+    for field in ("open", "high", "low", "close", "volume"):
+        col = f"target__SPY__{field}"
+        assert col in aligned.columns, f"missing {col}"
+    assert aligned["target__SPY__open"].to_list() == [539.5, 539.5]
+    assert aligned["target__SPY__high"].to_list() == [540.5, 540.5]
+    assert aligned["target__SPY__low"].to_list() == [539.0, 539.0]
+    assert aligned["target__SPY__volume"].to_list() == [1000000, 1000000]
+
+
+def test_align_channels_missing_mask_true_when_no_prior_observation():
+    """Sprint 042 §5: missing_mask__{key} is True at any grid_ts before the channel's
+    first known_at."""
+    e = _fresh_emitter()
+    grid = pl.DataFrame(
+        {
+            "grid_ts": [
+                datetime.fromisoformat("2024-06-03T14:45:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:00:00+00:00"),
+            ]
+        }
+    )
+    bars = pl.DataFrame(
+        {
+            # First observation lands AFTER the first grid_ts.
+            "known_at": [datetime.fromisoformat("2024-06-03T14:50:00+00:00")],
+            "close": [540.0],
+            "channel": ["target"],
+            "symbol": ["SPY"],
+        }
+    )
+    aligned = align_channels(grid, {"target__SPY": bars}, e)
+    assert aligned["missing_mask__target__SPY"].to_list() == [True, False]
+
+
+def test_align_channels_observed_at_this_grid_step_and_age_since_known_at():
+    """Sprint 042 §5: observed_at_this_grid_step flips True when the picked known_at
+    differs from the previous grid step's; age_since_known_at counts up between
+    fresh observations and resets to 0 on each fresh one.
+    """
+    e = _fresh_emitter()
+    grid = pl.DataFrame(
+        {
+            "grid_ts": [
+                datetime.fromisoformat("2024-06-03T14:45:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:00:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:15:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:30:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:45:00+00:00"),
+            ]
+        }
+    )
+    # Bars known at 14:31 and 15:31 UTC. Grid 14:45 sees the 14:31 bar; 15:00 and 15:15
+    # still see 14:31 (backward-fill); 15:30 sees 14:31; 15:45 sees the new 15:31 bar.
+    bars = pl.DataFrame(
+        {
+            "known_at": [
+                datetime.fromisoformat("2024-06-03T14:31:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:31:00+00:00"),
+            ],
+            "close": [540.0, 541.0],
+            "channel": ["target", "target"],
+            "symbol": ["SPY", "SPY"],
+        }
+    )
+    aligned = align_channels(grid, {"target__SPY": bars}, e)
+    # 14:45 = first-ever observation (fresh); 15:00, 15:15, 15:30 = same known_at as prior
+    # (not fresh); 15:45 = new known_at (fresh again).
+    assert aligned["observed_at_this_grid_step__target__SPY"].to_list() == [
+        True, False, False, False, True,
+    ]
+    # age counter: 0 at 14:45 (fresh), 1 at 15:00, 2 at 15:15, 3 at 15:30, 0 at 15:45.
+    assert aligned["age_since_known_at__target__SPY"].to_list() == [0, 1, 2, 3, 0]
+
+
+def test_align_channels_age_stays_zero_while_missing_mask_true():
+    """Sprint 042 §5: age_since_known_at is 0 (and observed=False) while the channel
+    has produced no observations yet."""
+    e = _fresh_emitter()
+    grid = pl.DataFrame(
+        {
+            "grid_ts": [
+                datetime.fromisoformat("2024-06-03T14:45:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:00:00+00:00"),
+                datetime.fromisoformat("2024-06-03T15:15:00+00:00"),
+            ]
+        }
+    )
+    bars = pl.DataFrame(
+        {
+            # First observation lands after every grid row.
+            "known_at": [datetime.fromisoformat("2024-06-03T16:00:00+00:00")],
+            "close": [540.0],
+            "channel": ["target"],
+            "symbol": ["SPY"],
+        }
+    )
+    aligned = align_channels(grid, {"target__SPY": bars}, e)
+    assert aligned["missing_mask__target__SPY"].to_list() == [True, True, True]
+    assert aligned["observed_at_this_grid_step__target__SPY"].to_list() == [False, False, False]
+    assert aligned["age_since_known_at__target__SPY"].to_list() == [0, 0, 0]
 
 
 def test_load_channel_bars_raises_on_missing_cache(tmp_path: Path):
