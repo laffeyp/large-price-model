@@ -31,6 +31,7 @@ from price_space_llm.ingestion.alphavantage import (
     alphavantage_extract_metadata,
     alphavantage_index_extract_metadata,
     alphavantage_macro_extract_metadata,
+    alphavantage_options_extract_metadata,
     alphavantage_put_call_ratio_extract_metadata,
     make_alphavantage_raw_fetcher,
 )
@@ -40,7 +41,12 @@ from price_space_llm.script_harness import script_session
 _MACRO_TOOLS = frozenset(
     {"CPI", "FEDERAL_FUNDS_RATE", "TREASURY_YIELD", "UNEMPLOYMENT", "NONFARM_PAYROLL"}
 )
-_OPTIONS_PER_DATE_TOOLS = frozenset({"HISTORICAL_PUT_CALL_RATIO"})
+_OPTIONS_PER_DATE_TOOLS = frozenset({"HISTORICAL_PUT_CALL_RATIO", "HISTORICAL_OPTIONS"})
+
+_OPTIONS_EXTRACTORS = {
+    "HISTORICAL_PUT_CALL_RATIO": alphavantage_put_call_ratio_extract_metadata,
+    "HISTORICAL_OPTIONS": alphavantage_options_extract_metadata,
+}
 
 
 def _weekdays_in_month_range(months: list[str]) -> list[str]:
@@ -76,9 +82,13 @@ def _month_range(start: str, end: str) -> list[str]:
 def _load_accepted_channels(manifest_path: Path) -> list[dict]:
     """Return the list of accepted channel entries as manifest-shaped dicts.
 
-    `tool` defaults to `TIME_SERIES_INTRADAY` when unset. Sprint 045: macro
-    channels carry `params`, `known_at_lag_days`, and `known_at_hour_utc`
-    fields that pass through untouched.
+    Fields:
+    - `channel`, `symbol`: identify the aligned-parquet column (`{channel}__{symbol}__*`).
+    - `av_symbol`: the underlying symbol AV sees in requests; defaults to `symbol`.
+      Sprint 047 introduced the split so two options aggregates on SPY (PCR_SPY,
+      VOL_SPY) can coexist under distinct aligned column names while still
+      hitting AV with `symbol=SPY`.
+    - `tool`, `params`, `known_at_lag_days`, `known_at_hour_utc`: as before.
     """
     doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     out = []
@@ -89,6 +99,7 @@ def _load_accepted_channels(manifest_path: Path) -> list[dict]:
             {
                 "channel": c["channel"],
                 "symbol": c["symbol"],
+                "av_symbol": c.get("av_symbol", c["symbol"]),
                 "source": c["source"],
                 "tool": c.get("tool", "TIME_SERIES_INTRADAY"),
                 "params": c.get("params"),
@@ -255,14 +266,16 @@ def main(argv: list[str] | None = None) -> int:
 
             weekdays = _weekdays_in_month_range(months)
             for ch in options_channels:
+                extractor = _OPTIONS_EXTRACTORS[ch["tool"]]
+                av_symbol = ch["av_symbol"]
                 for d in weekdays:
                     try:
                         client.call(
                             channel=ch["channel"],
                             symbol=ch["symbol"],
                             tool=ch["tool"],
-                            params={"symbol": ch["symbol"], "date": d, "datatype": "json"},
-                            extract_metadata=alphavantage_put_call_ratio_extract_metadata,
+                            params={"symbol": av_symbol, "date": d, "datatype": "json"},
+                            extract_metadata=extractor,
                         )
                         n_ok += 1
                     except (IngestionCallFailed, AlphaVantageError) as ex:

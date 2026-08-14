@@ -16,6 +16,7 @@ from price_space_llm.alignment.join import (
     load_channel_bars,
     load_index_daily_bars,
     load_macro_bars,
+    load_options_volume_bars,
     load_put_call_ratio_bars,
     run_alignment,
 )
@@ -787,6 +788,107 @@ def test_load_put_call_ratio_bars_ignores_other_symbols(tmp_path: Path):
         known_at_hour_utc=13,
     )
     assert bars.height == 1
+    assert bars["close"][0] == 1.11
+
+
+# load_options_volume_bars (Sprint 047) -----------------------------------
+
+
+def _write_options_cache(
+    tmp_path: Path, av_symbol: str, date_str: str, contract_volumes: list[int]
+) -> Path:
+    """Write a per-date HISTORICAL_OPTIONS cache entry with the given per-contract
+    volume values. Each row carries the underlying symbol in its `symbol` field."""
+    from price_space_llm.ingestion import cache as _cache_mod
+    params = {"symbol": av_symbol, "date": date_str, "datatype": "json"}
+    key = _cache_mod.cache_key("HISTORICAL_OPTIONS", "options", av_symbol, params)
+    path = _cache_mod.cache_path(tmp_path, "mcp_av", "HISTORICAL_OPTIONS", key)
+    payload = {
+        "message": "success",
+        "endpoint": "HISTORICAL_OPTIONS",
+        "data": [
+            {
+                "contractID": f"CID{i}",
+                "symbol": av_symbol,
+                "expiration": "2024-06-21",
+                "strike": "500.00",
+                "type": "call" if i % 2 == 0 else "put",
+                "date": date_str,
+                "volume": str(v),
+                "open_interest": "100",
+            }
+            for i, v in enumerate(contract_volumes)
+        ],
+    }
+    _cache_mod.write(path, payload)
+    return path
+
+
+def test_load_options_volume_bars_sums_across_contracts(tmp_path: Path):
+    """Sprint 047: aggregate volume = sum of per-contract volume."""
+    _write_options_cache(tmp_path, "SPY", "2024-06-03", [100, 200, 300, 400])
+    _write_options_cache(tmp_path, "SPY", "2024-06-04", [50, 50, 50])
+    bars = load_options_volume_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        symbol="VOL_SPY",
+        channel="options",
+        known_at_lag_days=1,
+        known_at_hour_utc=13,
+        av_symbol="SPY",
+    )
+    assert bars.height == 2
+    # DataFrame's `symbol` field carries the manifest-visible identifier, not the AV underlying.
+    assert bars["symbol"].unique().to_list() == ["VOL_SPY"]
+    assert bars["close"].to_list() == [1000.0, 150.0]
+
+
+def test_load_options_volume_bars_filters_by_av_symbol(tmp_path: Path):
+    """Cached files for other underlyings do not leak in."""
+    _write_options_cache(tmp_path, "SPY", "2024-06-03", [1000])
+    _write_options_cache(tmp_path, "QQQ", "2024-06-03", [9999])
+    bars = load_options_volume_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        symbol="VOL_SPY",
+        channel="options",
+        known_at_lag_days=1,
+        known_at_hour_utc=13,
+        av_symbol="SPY",
+    )
+    assert bars.height == 1
+    assert bars["close"][0] == 1000.0
+
+
+def test_load_options_volume_bars_raises_on_empty_directory(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="no HISTORICAL_OPTIONS cache"):
+        load_options_volume_bars(
+            cache_dir=tmp_path,
+            source="mcp_av",
+            symbol="VOL_SPY",
+            channel="options",
+            known_at_lag_days=1,
+            known_at_hour_utc=13,
+            av_symbol="SPY",
+        )
+
+
+def test_load_put_call_ratio_bars_av_symbol_split(tmp_path: Path):
+    """Sprint 047: av_symbol lets manifest identity (symbol='PCR_SPY') differ from
+    AV underlying (av_symbol='SPY'). The returned DataFrame uses `symbol` for
+    aligned-column identity but filters cache by `av_symbol`."""
+    _write_pcr_cache(tmp_path, "SPY", "2024-06-03", "1.11")
+    bars = load_put_call_ratio_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        symbol="PCR_SPY",
+        channel="options",
+        known_at_lag_days=1,
+        known_at_hour_utc=13,
+        av_symbol="SPY",
+    )
+    assert bars.height == 1
+    assert bars["symbol"][0] == "PCR_SPY"
     assert bars["close"][0] == 1.11
 
 

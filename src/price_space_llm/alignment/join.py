@@ -221,32 +221,37 @@ def load_macro_bars(
     return pl.DataFrame(rows).sort("known_at")
 
 
-def load_put_call_ratio_bars(
+def load_options_volume_bars(
     cache_dir: Path,
     source: str,
     symbol: str,
     channel: str,
     known_at_lag_days: int,
     known_at_hour_utc: int,
+    av_symbol: str | None = None,
 ) -> pl.DataFrame:
-    """Read all cached HISTORICAL_PUT_CALL_RATIO responses for `symbol` and return
-    bars in the standard `{known_at, open, high, low, close, volume, channel,
-    symbol}` shape.
+    """Read all cached HISTORICAL_OPTIONS responses for `av_symbol` and return bars
+    with `close = sum(volume across all contracts)` for each date.
 
-    Sprint 046: unlike macros and index-data, this endpoint returns ONE date per
-    call and each date lands in a distinct cache file. The loader walks the
-    HISTORICAL_PUT_CALL_RATIO cache directory, filters to responses matching
-    `symbol`, and constructs a per-date time series.
+    Sprint 047: ships the second options channel spec §Channels names. Each
+    HISTORICAL_OPTIONS response covers one date and carries per-contract rows
+    with `contractID, expiration, strike, type, volume, open_interest, ...`.
+    The loader iterates the cache directory, filters by `av_symbol` (the AV
+    underlying identifier), and sums the `volume` field across every contract
+    on each date to produce one aggregate scalar per date. The returned
+    DataFrame's `symbol` field carries the manifest-visible identifier so the
+    aligned column becomes `{channel}__{symbol}__*` even when two channels
+    share the same AV underlying (PCR_SPY + VOL_SPY both target SPY).
 
-    `known_at = value_time + known_at_lag_days at known_at_hour_utc`.
-    Value used = `put_call_ratio_full_chain`; the per-expiration breakdown is
-    ignored for v1. OHLC filled with the same value; volume = 0.
+    `known_at = value_time + known_at_lag_days at known_at_hour_utc`. OHLC
+    filled with the same aggregate; volume field set to 0 to match the schema
+    used for macro and put/call-ratio channels.
     """
-    tool_dir = cache_dir / source / "HISTORICAL_PUT_CALL_RATIO"
+    if av_symbol is None:
+        av_symbol = symbol
+    tool_dir = cache_dir / source / "HISTORICAL_OPTIONS"
     if not tool_dir.exists():
-        raise FileNotFoundError(
-            f"no HISTORICAL_PUT_CALL_RATIO cache directory at {tool_dir}"
-        )
+        raise FileNotFoundError(f"no HISTORICAL_OPTIONS cache directory at {tool_dir}")
 
     rows: list[dict[str, Any]] = []
     for cache_file in tool_dir.glob("*.json"):
@@ -255,7 +260,88 @@ def load_put_call_ratio_bars(
         payload = _cache.read(cache_file)
         if payload is None:
             continue
-        if payload.get("symbol") != symbol:
+        data = payload.get("data") or []
+        if not data:
+            continue
+        # HISTORICAL_OPTIONS response does not carry a top-level `symbol` field;
+        # per-contract `symbol` field on each row identifies the underlying.
+        if data[0].get("symbol") != av_symbol:
+            continue
+        date_str = data[0].get("date")
+        if not date_str:
+            continue
+        total_volume = 0
+        for row in data:
+            v = row.get("volume")
+            if v is None:
+                continue
+            try:
+                total_volume += int(v)
+            except (TypeError, ValueError):
+                continue
+        naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        value_time_utc = naive_midnight.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+        known_at = value_time_utc + timedelta(days=known_at_lag_days, hours=known_at_hour_utc)
+        v_float = float(total_volume)
+        rows.append(
+            {
+                "known_at": known_at,
+                "open": v_float,
+                "high": v_float,
+                "low": v_float,
+                "close": v_float,
+                "volume": 0,
+                "channel": channel,
+                "symbol": symbol,
+            }
+        )
+    if not rows:
+        raise ValueError(
+            f"no HISTORICAL_OPTIONS cache rows matched av_symbol={av_symbol!r} in {tool_dir}"
+        )
+    return pl.DataFrame(rows).sort("known_at").unique(subset="known_at")
+
+
+def load_put_call_ratio_bars(
+    cache_dir: Path,
+    source: str,
+    symbol: str,
+    channel: str,
+    known_at_lag_days: int,
+    known_at_hour_utc: int,
+    av_symbol: str | None = None,
+) -> pl.DataFrame:
+    """Read all cached HISTORICAL_PUT_CALL_RATIO responses for `av_symbol` and
+    return bars in the standard `{known_at, open, high, low, close, volume,
+    channel, symbol}` shape.
+
+    Sprint 046: unlike macros and index-data, this endpoint returns ONE date per
+    call and each date lands in a distinct cache file. The loader walks the
+    HISTORICAL_PUT_CALL_RATIO cache directory, filters to responses matching
+    `av_symbol`, and constructs a per-date time series.
+
+    Sprint 047: added `av_symbol` split so the manifest can distinguish
+    aligned-column identity (`symbol`, e.g. PCR_SPY) from the AV underlying
+    (`av_symbol`, e.g. SPY). Defaults to symbol when unset.
+
+    `known_at = value_time + known_at_lag_days at known_at_hour_utc`.
+    Value used = `put_call_ratio_full_chain`; the per-expiration breakdown is
+    ignored for v1. OHLC filled with the same value; volume = 0.
+    """
+    if av_symbol is None:
+        av_symbol = symbol
+    tool_dir = cache_dir / source / "HISTORICAL_PUT_CALL_RATIO"
+    if not tool_dir.exists():
+        raise FileNotFoundError(f"no HISTORICAL_PUT_CALL_RATIO cache directory at {tool_dir}")
+
+    rows: list[dict[str, Any]] = []
+    for cache_file in tool_dir.glob("*.json"):
+        if cache_file.name.endswith(".meta.json"):
+            continue
+        payload = _cache.read(cache_file)
+        if payload is None:
+            continue
+        if payload.get("symbol") != av_symbol:
             continue
         date_str = payload.get("date")
         value = payload.get("put_call_ratio_full_chain")
@@ -282,7 +368,7 @@ def load_put_call_ratio_bars(
         )
     if not rows:
         raise ValueError(
-            f"no HISTORICAL_PUT_CALL_RATIO cache rows matched symbol={symbol!r} in {tool_dir}"
+            f"no HISTORICAL_PUT_CALL_RATIO cache rows matched av_symbol={av_symbol!r} in {tool_dir}"
         )
     return pl.DataFrame(rows).sort("known_at").unique(subset="known_at")
 
@@ -587,6 +673,8 @@ def run_alignment(
         elif tool == "HISTORICAL_PUT_CALL_RATIO":
             # Sprint 046: one endpoint call per date; loader walks the cache dir
             # to build the full time series from many single-date cache files.
+            # Sprint 047: av_symbol split -- filter cache by AV underlying;
+            # tag DataFrame with manifest-visible symbol.
             combined = load_put_call_ratio_bars(
                 cache_dir=cache_dir,
                 source=c["source"],
@@ -594,6 +682,20 @@ def run_alignment(
                 channel=c["channel"],
                 known_at_lag_days=int(c.get("known_at_lag_days", 1)),
                 known_at_hour_utc=int(c.get("known_at_hour_utc", 13)),
+                av_symbol=c.get("av_symbol", c["symbol"]),
+            )
+        elif tool == "HISTORICAL_OPTIONS":
+            # Sprint 047: per-contract volume aggregation. One endpoint call per
+            # date; each response carries thousands of contract rows; loader sums
+            # the volume field across all contracts per date.
+            combined = load_options_volume_bars(
+                cache_dir=cache_dir,
+                source=c["source"],
+                symbol=c["symbol"],
+                channel=c["channel"],
+                known_at_lag_days=int(c.get("known_at_lag_days", 1)),
+                known_at_hour_utc=int(c.get("known_at_hour_utc", 13)),
+                av_symbol=c.get("av_symbol", c["symbol"]),
             )
         else:
             raise ValueError(f"unsupported tool {tool!r} on channel {c['channel']}/{c['symbol']}")

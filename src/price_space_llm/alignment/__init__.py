@@ -18,6 +18,7 @@ from price_space_llm.alignment.join import (
     load_channel_bars,
     load_index_daily_bars,
     load_macro_bars,
+    load_options_volume_bars,
     load_put_call_ratio_bars,
     run_alignment,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "load_channel_bars",
     "load_index_daily_bars",
     "load_macro_bars",
+    "load_options_volume_bars",
     "load_put_call_ratio_bars",
     "run_alignment",
 ]
