@@ -382,6 +382,246 @@ _MACRO_TOOLS = {
 }
 
 
+# Sprint 048: monthly options expiration rolls back to Thursday when the third
+# Friday of the month is a US market holiday. Only one such collision in the
+# 2015-2025 window: 2022-04-15 was Good Friday (market closed), so April 2022
+# monthly SPY options expired 2022-04-14. Well-documented CBOE convention. If
+# the window extends, add entries here (next likely: 2026-06-19 Juneteenth on
+# the third Friday of June 2026).
+_OPTIONS_EXPIRY_HOLIDAY_ROLLBACK = {
+    "2022-04-15": "2022-04-14",
+}
+
+
+def _third_friday_of_month(year: int, month: int) -> date:
+    """Return the third Friday of the given month. Deterministic date arithmetic."""
+    first = date(year, month, 1)
+    # weekday() Monday=0..Friday=4. Offset to the first Friday.
+    offset = (4 - first.weekday()) % 7
+    first_friday = first + timedelta(days=offset)
+    return first_friday + timedelta(days=14)
+
+
+def load_earnings_density_bars(
+    cache_dir: Path,
+    source: str,
+    channel: str,
+    symbol: str,
+) -> pl.DataFrame:
+    """Read every cached per-symbol EARNINGS response and return a per-date
+    scalar `close = count of constituents reporting on that date`.
+
+    Sprint 048: `EARNINGS_CALENDAR` is forward-only, so historical earnings
+    density comes from per-symbol `EARNINGS` calls. The loader walks the
+    EARNINGS cache directory, extracts every `quarterlyEarnings[].reportedDate`
+    from every cached response, and counts occurrences per date. Returns one
+    row per date with `close = count`; OHLC uniform-filled; volume = 0.
+
+    `known_at = reportedDate + midnight ET` — release-schedule is public
+    within days of the report, so a bar closing 09:45 ET on the reportedDate
+    may legally consume the flag.
+
+    The DataFrame's `channel` and `symbol` fields carry the manifest-visible
+    identifiers passed in (e.g. `event`/`EARNINGS_DENSITY_SPX`), not any AV
+    per-symbol ticker.
+    """
+    tool_dir = cache_dir / source / "EARNINGS"
+    if not tool_dir.exists():
+        raise FileNotFoundError(f"no EARNINGS cache directory at {tool_dir}")
+
+    counts: dict[str, int] = {}
+    for cache_file in tool_dir.glob("*.json"):
+        if cache_file.name.endswith(".meta.json"):
+            continue
+        payload = _cache.read(cache_file)
+        if payload is None:
+            continue
+        quarterly = payload.get("quarterlyEarnings") or []
+        for row in quarterly:
+            reported = row.get("reportedDate")
+            if not reported:
+                continue
+            counts[reported] = counts.get(reported, 0) + 1
+
+    if not counts:
+        raise ValueError(f"no EARNINGS cache rows carried a reportedDate in {tool_dir}")
+
+    rows: list[dict[str, Any]] = []
+    for date_str, count in counts.items():
+        naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        value_time_utc = naive_midnight.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+        c_float = float(count)
+        rows.append(
+            {
+                "known_at": value_time_utc,
+                "open": c_float,
+                "high": c_float,
+                "low": c_float,
+                "close": c_float,
+                "volume": 0,
+                "channel": channel,
+                "symbol": symbol,
+            }
+        )
+    return pl.DataFrame(rows).sort("known_at").unique(subset="known_at")
+
+
+def _load_static_date_list(path: Path) -> list[str]:
+    """Load a JSON file with a top-level `dates` list of YYYY-MM-DD strings."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    dates = doc.get("dates")
+    if not isinstance(dates, list) or not dates:
+        raise ValueError(f"{path} has no non-empty 'dates' list")
+    return sorted({str(d) for d in dates})
+
+
+def load_fomc_bars(
+    static_path: Path,
+    channel: str,
+    symbol: str,
+) -> pl.DataFrame:
+    """Read the curated FOMC-dates static table and return one row per meeting
+    date with `close = 1`.
+
+    Sprint 048: FOMC schedule is public months ahead, so `known_at` = the
+    meeting-date midnight ET. A bar closing 09:45 ET on an FOMC day sees the
+    flag; the 14:00 ET decision itself is a separate signal carried by the
+    macro__FEDFUNDS channel's `observed_at_this_grid_step` staleness column.
+    """
+    dates = _load_static_date_list(static_path)
+    rows: list[dict[str, Any]] = []
+    for date_str in dates:
+        naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        known_at = naive_midnight.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+        rows.append(
+            {
+                "known_at": known_at,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 0,
+                "channel": channel,
+                "symbol": symbol,
+            }
+        )
+    return pl.DataFrame(rows).sort("known_at")
+
+
+def load_cpi_release_bars(
+    cache_dir: Path,
+    source: str,
+    channel: str,
+    symbol: str,
+    known_at_lag_days: int,
+    known_at_hour_utc: int,
+) -> pl.DataFrame:
+    """Derive CPI-release event dates from the cached `macro__CPI` response.
+
+    Sprint 048: BLS's release calendar is not carried on any Alpha-Vantage
+    endpoint, and no free public source proved fetchable during Sprint 048.
+    v1 approximation: use the same known_at rule Sprint 045 installed for
+    `macro__CPI` (reference_month_first + known_at_lag_days at
+    known_at_hour_utc). This is a within-week approximation of BLS's actual
+    release timing — the actual release lands 10-15 calendar days into the
+    month following the reference month, whereas this rule stamps ~45 days
+    after reference-month-first. The event *ordering* is preserved (one
+    event per released CPI observation) and the density (12/year) is
+    correct.
+
+    Real BLS release dates require a paid feed (or manual curation from
+    bls.gov archives, which return 403 to unauthenticated fetchers). v1
+    accepts the approximation and names it.
+
+    `close = 1` on each release. OHLC uniform-filled; volume = 0.
+    """
+    params = _default_macro_params("CPI")
+    key = _cache.cache_key("CPI", "macro", "CPI", params)
+    path = _cache.cache_path(cache_dir, source, "CPI", key)
+    payload = _cache.read(path)
+    if payload is None:
+        raise FileNotFoundError(
+            f"cache miss for macro__CPI (required by event__CPI_RELEASE): {path}"
+        )
+
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        raise ValueError(f"CPI response has no non-empty 'data' list: {path}")
+
+    rows: list[dict[str, Any]] = []
+    for row in data:
+        date_str = row.get("date")
+        value_str = row.get("value")
+        if not date_str or value_str in (None, "", "."):
+            continue
+        naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        value_time_utc = naive_midnight.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+        known_at = value_time_utc + timedelta(days=known_at_lag_days, hours=known_at_hour_utc)
+        rows.append(
+            {
+                "known_at": known_at,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 0,
+                "channel": channel,
+                "symbol": symbol,
+            }
+        )
+    if not rows:
+        raise ValueError(f"no CPI rows carried a usable date in {path}")
+    return pl.DataFrame(rows).sort("known_at").unique(subset="known_at")
+
+
+def load_options_expiry_bars(
+    start: date,
+    end: date,
+    channel: str,
+    symbol: str,
+) -> pl.DataFrame:
+    """Generate deterministic monthly SPY options expiry dates over [start, end].
+
+    Sprint 048: monthly SPY options expire on the third Friday of every month,
+    with one CBOE-convention holiday rollback (2022-04-15 Good Friday →
+    2022-04-14 Thursday) covered by `_OPTIONS_EXPIRY_HOLIDAY_ROLLBACK`.
+
+    `known_at` = expiry-date midnight ET. `close = 1` per expiry; OHLC
+    uniform-filled; volume = 0.
+
+    No AV call. No cache. Pure date arithmetic + one lookup.
+    """
+    rows: list[dict[str, Any]] = []
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        exp = _third_friday_of_month(year, month)
+        rollback = _OPTIONS_EXPIRY_HOLIDAY_ROLLBACK.get(exp.isoformat())
+        if rollback is not None:
+            exp = date.fromisoformat(rollback)
+        if start <= exp <= end:
+            naive_midnight = datetime.strptime(f"{exp.isoformat()} 00:00:00", "%Y-%m-%d %H:%M:%S")
+            known_at = naive_midnight.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+            rows.append(
+                {
+                    "known_at": known_at,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "volume": 0,
+                    "channel": channel,
+                    "symbol": symbol,
+                }
+            )
+        month += 1
+        if month == 13:
+            month = 1
+            year += 1
+    if not rows:
+        raise ValueError(f"no options expiries in [{start.isoformat()}, {end.isoformat()}]")
+    return pl.DataFrame(rows).sort("known_at")
+
+
 def _default_macro_params(tool: str) -> dict[str, Any]:
     """Default per-tool params matching the AV endpoint defaults + spec §Channels
     choices (daily for FEDFUNDS/TREASURY_YIELD; 10year maturity for TREASURY_YIELD).
@@ -696,6 +936,45 @@ def run_alignment(
                 known_at_lag_days=int(c.get("known_at_lag_days", 1)),
                 known_at_hour_utc=int(c.get("known_at_hour_utc", 13)),
                 av_symbol=c.get("av_symbol", c["symbol"]),
+            )
+        elif tool == "EARNINGS":
+            # Sprint 048: per-symbol EARNINGS aggregated across SPX constituents
+            # into a per-date density scalar. Historical path since
+            # EARNINGS_CALENDAR is forward-only.
+            combined = load_earnings_density_bars(
+                cache_dir=cache_dir,
+                source=c["source"],
+                channel=c["channel"],
+                symbol=c["symbol"],
+            )
+        elif tool == "STATIC_FOMC":
+            # Sprint 048: curated FOMC-dates static table (2015-2025).
+            static_path = Path(c["static_path"])
+            combined = load_fomc_bars(
+                static_path=static_path,
+                channel=c["channel"],
+                symbol=c["symbol"],
+            )
+        elif tool == "STATIC_CPI_RELEASE":
+            # Sprint 048: derived from macro__CPI cache with Sprint 045 known-at
+            # rule. Within-week approximation of BLS release timing; documented
+            # in the loader docstring.
+            combined = load_cpi_release_bars(
+                cache_dir=cache_dir,
+                source=c["source"],
+                channel=c["channel"],
+                symbol=c["symbol"],
+                known_at_lag_days=int(c.get("known_at_lag_days", 45)),
+                known_at_hour_utc=int(c.get("known_at_hour_utc", 12)),
+            )
+        elif tool == "DETERMINISTIC_OPTIONS_EXPIRY":
+            # Sprint 048: deterministic third-Friday-monthly with a CBOE
+            # holiday-rollback lookup. No AV call, no cache.
+            combined = load_options_expiry_bars(
+                start=start,
+                end=end,
+                channel=c["channel"],
+                symbol=c["symbol"],
             )
         else:
             raise ValueError(f"unsupported tool {tool!r} on channel {c['channel']}/{c['symbol']}")

@@ -10,12 +10,17 @@ import polars as pl
 import pytest
 
 from price_space_llm.alignment.join import (
+    _third_friday_of_month,
     align_channels,
     build_rth_grid,
     enumerate_months,
     load_channel_bars,
+    load_cpi_release_bars,
+    load_earnings_density_bars,
+    load_fomc_bars,
     load_index_daily_bars,
     load_macro_bars,
+    load_options_expiry_bars,
     load_options_volume_bars,
     load_put_call_ratio_bars,
     run_alignment,
@@ -735,6 +740,7 @@ def test_load_macro_bars_skips_rows_with_dot_value(tmp_path: Path):
 def _write_pcr_cache(tmp_path: Path, symbol: str, date_str: str, value: str | None) -> Path:
     """Write a per-date HISTORICAL_PUT_CALL_RATIO cache entry."""
     from price_space_llm.ingestion import cache as _cache_mod
+
     params = {"symbol": symbol, "date": date_str, "datatype": "json"}
     key = _cache_mod.cache_key("HISTORICAL_PUT_CALL_RATIO", "options", symbol, params)
     path = _cache_mod.cache_path(tmp_path, "mcp_av", "HISTORICAL_PUT_CALL_RATIO", key)
@@ -800,6 +806,7 @@ def _write_options_cache(
     """Write a per-date HISTORICAL_OPTIONS cache entry with the given per-contract
     volume values. Each row carries the underlying symbol in its `symbol` field."""
     from price_space_llm.ingestion import cache as _cache_mod
+
     params = {"symbol": av_symbol, "date": date_str, "datatype": "json"}
     key = _cache_mod.cache_key("HISTORICAL_OPTIONS", "options", av_symbol, params)
     path = _cache_mod.cache_path(tmp_path, "mcp_av", "HISTORICAL_OPTIONS", key)
@@ -1067,6 +1074,272 @@ def test_run_alignment_rejects_unsupported_tool(tmp_path: Path):
             emitter=_fresh_emitter(),
             run_id="test",
         )
+
+
+# event channels (Sprint 048) --------------------------------------------
+
+
+def _write_earnings_cache(tmp_path: Path, ticker: str, reported_dates: list[str]) -> Path:
+    """Write a per-symbol EARNINGS cache entry with the given reportedDate list."""
+    from price_space_llm.ingestion import cache as _cache_mod
+
+    params = {"symbol": ticker, "datatype": "json"}
+    key = _cache_mod.cache_key("EARNINGS", "event", ticker, params)
+    path = _cache_mod.cache_path(tmp_path, "mcp_av", "EARNINGS", key)
+    payload = {
+        "symbol": ticker,
+        "annualEarnings": [],
+        "quarterlyEarnings": [
+            {"fiscalDateEnding": d, "reportedDate": d, "reportedEPS": "1.00"}
+            for d in reported_dates
+        ],
+    }
+    _cache_mod.write(path, payload)
+    return path
+
+
+def test_load_earnings_density_bars_counts_across_tickers(tmp_path: Path):
+    """Sprint 048: two tickers reporting the same date produce close=2 on that date."""
+    _write_earnings_cache(tmp_path, "AAPL", ["2023-01-25", "2023-04-27"])
+    _write_earnings_cache(tmp_path, "MSFT", ["2023-01-25", "2023-04-25"])
+    _write_earnings_cache(tmp_path, "GOOG", ["2023-04-25"])
+    bars = load_earnings_density_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        channel="event",
+        symbol="EARNINGS_DENSITY_SPX",
+    )
+    assert bars.height == 3  # 01-25, 04-25, 04-27
+    by_date = {b["known_at"].date(): b["close"] for b in bars.iter_rows(named=True)}
+    assert by_date[date(2023, 1, 25)] == 2.0
+    assert by_date[date(2023, 4, 25)] == 2.0
+    assert by_date[date(2023, 4, 27)] == 1.0
+
+
+def test_load_earnings_density_bars_ignores_missing_reported_dates(tmp_path: Path):
+    """Rows with no reportedDate get skipped, not counted as null."""
+    from price_space_llm.ingestion import cache as _cache_mod
+
+    params = {"symbol": "AAPL", "datatype": "json"}
+    key = _cache_mod.cache_key("EARNINGS", "event", "AAPL", params)
+    path = _cache_mod.cache_path(tmp_path, "mcp_av", "EARNINGS", key)
+    payload = {
+        "symbol": "AAPL",
+        "quarterlyEarnings": [
+            {"fiscalDateEnding": "2023-01-25", "reportedDate": "2023-01-25"},
+            {"fiscalDateEnding": "2023-04-27", "reportedDate": None},
+        ],
+    }
+    _cache_mod.write(path, payload)
+    bars = load_earnings_density_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        channel="event",
+        symbol="EARNINGS_DENSITY_SPX",
+    )
+    assert bars.height == 1
+    assert bars["close"][0] == 1.0
+
+
+def test_load_earnings_density_bars_raises_on_missing_cache_dir(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="no EARNINGS cache"):
+        load_earnings_density_bars(
+            cache_dir=tmp_path,
+            source="mcp_av",
+            channel="event",
+            symbol="EARNINGS_DENSITY_SPX",
+        )
+
+
+def test_load_fomc_bars_loads_curated_dates(tmp_path: Path):
+    """Sprint 048: FOMC static table produces one row per meeting date."""
+    static_path = tmp_path / "fomc.json"
+    static_path.write_text(json.dumps({"dates": ["2023-03-22", "2023-05-03", "2023-06-14"]}))
+    bars = load_fomc_bars(static_path=static_path, channel="event", symbol="FOMC")
+    assert bars.height == 3
+    assert bars["close"].to_list() == [1.0, 1.0, 1.0]
+    # 2023-03-22 midnight ET = 04:00 UTC (EDT, UTC-4).
+    first = bars["known_at"][0]
+    assert first.date() == date(2023, 3, 22)
+    assert first.hour == 4
+
+
+def test_load_options_expiry_bars_third_friday(tmp_path: Path):
+    """Sprint 048: options expiry = third Friday of the month, deterministic.
+    January 2023 third Friday = 2023-01-20."""
+    bars = load_options_expiry_bars(
+        start=date(2023, 1, 1),
+        end=date(2023, 1, 31),
+        channel="event",
+        symbol="OPTIONS_EXPIRY",
+    )
+    assert bars.height == 1
+    assert bars["known_at"][0].date() == date(2023, 1, 20)
+
+
+def test_load_options_expiry_bars_rolls_forward_on_good_friday(tmp_path: Path):
+    """Sprint 048: 2022-04-15 was Good Friday; SPY monthly options rolled to
+    Thursday 2022-04-14 per CBOE convention."""
+    bars = load_options_expiry_bars(
+        start=date(2022, 4, 1),
+        end=date(2022, 4, 30),
+        channel="event",
+        symbol="OPTIONS_EXPIRY",
+    )
+    assert bars.height == 1
+    assert bars["known_at"][0].date() == date(2022, 4, 14)
+
+
+def test_load_options_expiry_bars_spans_year(tmp_path: Path):
+    """A full 2023 range produces 12 expiries, one per month."""
+    bars = load_options_expiry_bars(
+        start=date(2023, 1, 1),
+        end=date(2023, 12, 31),
+        channel="event",
+        symbol="OPTIONS_EXPIRY",
+    )
+    assert bars.height == 12
+
+
+def test_third_friday_arithmetic():
+    """Direct sanity checks against known third Fridays."""
+    assert _third_friday_of_month(2023, 1) == date(2023, 1, 20)
+    assert _third_friday_of_month(2023, 6) == date(2023, 6, 16)
+    assert _third_friday_of_month(2024, 3) == date(2024, 3, 15)
+    # 2022-04-15 is the raw third Friday; rollback lookup lives in the loader.
+    assert _third_friday_of_month(2022, 4) == date(2022, 4, 15)
+
+
+def test_load_cpi_release_bars_stamps_from_macro_cpi_cache(tmp_path: Path):
+    """Sprint 048: CPI release event dates derive from the macro__CPI cache using
+    the Sprint 045 known-at rule (reference_month + 45 days at 12 UTC)."""
+    _write_macro_cache(
+        tmp_path,
+        "CPI",
+        "macro",
+        "CPI",
+        [
+            {"date": "2024-04-01", "value": "313.548"},
+            {"date": "2024-03-01", "value": "312.332"},
+        ],
+    )
+    bars = load_cpi_release_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        channel="event",
+        symbol="CPI_RELEASE",
+        known_at_lag_days=45,
+        known_at_hour_utc=12,
+    )
+    assert bars.height == 2
+    assert bars["close"].to_list() == [1.0, 1.0]
+    # April 2024 + 45 days = May 16 2024; + 12 UTC = 2024-05-16 16:00 UTC (04:00 EDT + 12h).
+    april_row = bars.filter(pl.col("known_at").dt.month() == 5).head(1)
+    known = april_row["known_at"][0]
+    assert known.day == 16
+
+
+def test_load_cpi_release_bars_raises_on_missing_cache(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="cache miss for macro__CPI"):
+        load_cpi_release_bars(
+            cache_dir=tmp_path,
+            source="mcp_av",
+            channel="event",
+            symbol="CPI_RELEASE",
+            known_at_lag_days=45,
+            known_at_hour_utc=12,
+        )
+
+
+def test_run_alignment_dispatches_event_channels(tmp_path: Path):
+    """Sprint 048: the four event tools each route through their own loader
+    branch and land in the aligned parquet as event__{symbol}__close columns."""
+    _write_cache(
+        tmp_path / "cache",
+        "target",
+        "SPY",
+        "2023-01",
+        {"2023-01-20 09:45:00": _bar(400.0)},
+    )
+    _write_earnings_cache(tmp_path / "cache", "AAPL", ["2023-01-20"])
+    _write_macro_cache(
+        tmp_path / "cache",
+        "CPI",
+        "macro",
+        "CPI",
+        [{"date": "2022-12-01", "value": "300.0"}],
+    )
+    fomc_path = tmp_path / "fomc.json"
+    fomc_path.write_text(json.dumps({"dates": ["2023-01-20"]}))
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "target__SPY": {
+                        "channel": "target",
+                        "symbol": "SPY",
+                        "source": "mcp_av",
+                        "tool": "TIME_SERIES_INTRADAY",
+                        "verdict": "accepted",
+                    },
+                    "event__EARNINGS_DENSITY_SPX": {
+                        "channel": "event",
+                        "symbol": "EARNINGS_DENSITY_SPX",
+                        "source": "mcp_av",
+                        "tool": "EARNINGS",
+                        "verdict": "accepted",
+                    },
+                    "event__FOMC": {
+                        "channel": "event",
+                        "symbol": "FOMC",
+                        "source": "static",
+                        "tool": "STATIC_FOMC",
+                        "verdict": "accepted",
+                        "static_path": str(fomc_path),
+                    },
+                    "event__CPI_RELEASE": {
+                        "channel": "event",
+                        "symbol": "CPI_RELEASE",
+                        "source": "mcp_av",
+                        "tool": "STATIC_CPI_RELEASE",
+                        "verdict": "accepted",
+                        "known_at_lag_days": 45,
+                        "known_at_hour_utc": 12,
+                    },
+                    "event__OPTIONS_EXPIRY": {
+                        "channel": "event",
+                        "symbol": "OPTIONS_EXPIRY",
+                        "source": "deterministic",
+                        "tool": "DETERMINISTIC_OPTIONS_EXPIRY",
+                        "verdict": "accepted",
+                    },
+                }
+            }
+        )
+    )
+    output = tmp_path / "aligned.parquet"
+    e = _fresh_emitter(max_buffer=32768)
+    run_alignment(
+        manifest_path=manifest_path,
+        cache_dir=tmp_path / "cache",
+        months=["2023-01"],
+        output_path=output,
+        emitter=e,
+        run_id="test-align-events",
+    )
+    aligned = pl.read_parquet(output)
+    for col in (
+        "event__EARNINGS_DENSITY_SPX__close",
+        "event__FOMC__close",
+        "event__CPI_RELEASE__close",
+        "event__OPTIONS_EXPIRY__close",
+    ):
+        assert col in aligned.columns, f"missing {col}"
+    # January 2023 has exactly one options expiry (2023-01-20). Every RTH bar
+    # at or after 2023-01-20 04:00 UTC forward-fills to close=1.
+    expiry_visible = aligned.filter(pl.col("event__OPTIONS_EXPIRY__close") == 1.0)
+    assert expiry_visible.height > 0
 
 
 def test_run_alignment_rejects_empty_months(tmp_path: Path):

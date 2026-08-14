@@ -233,7 +233,9 @@ Concrete fetchers for v1:
 | market_context | QQQ, IWM, VIX, TLT, DXY, GLD, USO | `TIME_SERIES_INTRADAY` | 5min | 15min (downsampled) |
 | macro | CPI, FEDFUNDS, DGS10, UNRATE, NFP | `CPI`, `FEDERAL_FUNDS_RATE`, `TREASURY_YIELD`, `UNEMPLOYMENT`, `NONFARM_PAYROLL` | daily/monthly | as-of joined on `known_at` |
 | options | put/call ratio, options volume | `HISTORICAL_PUT_CALL_RATIO`, `HISTORICAL_VOLUME_OPEN_INTEREST_RATIO` | daily | as-of joined on `known_at` |
-| event | earnings, FOMC, CPI releases | `EARNINGS_CALENDAR` + curated static tables | date-only | per-bar countdown |
+| event | earnings, FOMC, CPI releases, options expiry | per-symbol `EARNINGS` (see note) + curated static tables + deterministic third-Friday-monthly | date-only | per-bar countdown |
+
+**Event-tools note (Sprint 048).** `EARNINGS_CALENDAR` returns only the forward 3/6/12-month schedule from the request timestamp — it cannot backfill historical earnings dates for the 2015-2022 training window. The historical path is per-symbol `EARNINGS`, iterated across the SPX constituent list (`data/manifests/spx_constituents.json`); the loader aggregates `quarterlyEarnings[].reportedDate` counts across constituents into a per-date density scalar. FOMC dates come from a curated static table sourced from Federal Reserve historical calendars. CPI-release dates derive from the cached `macro__CPI` response using the same known-at rule the macro loader installs — a within-week approximation of BLS's actual release timing (BLS's release calendar is not carried on any AV endpoint; bls.gov returned 403 to unauthenticated fetchers during Sprint 048). Options expiry is deterministic third-Friday-monthly with a CBOE holiday-rollback lookup (one collision in 2015-2025: 2022-04-15 Good Friday → 2022-04-14).
 
 Cache is content-addressed by request parameters, so parameter changes force refetch. Cached responses land at `data/raw/{source}/{channel}/{symbol}/{yyyy-mm}.parquet`.
 

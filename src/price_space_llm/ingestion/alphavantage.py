@@ -355,6 +355,43 @@ def alphavantage_put_call_ratio_extract_metadata(response: dict[str, Any]) -> Ob
     )
 
 
+def alphavantage_earnings_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
+    """Extract ObservationMetadata from a per-symbol EARNINGS response.
+
+    Sprint 048: `EARNINGS_CALENDAR` is forward-only, so historical earnings
+    density on the training window comes from per-symbol `EARNINGS` calls.
+    The response carries `annualEarnings` and `quarterlyEarnings`; the loader
+    consumes `quarterlyEarnings[].reportedDate`.
+
+    `value_time` = the newest `reportedDate` parsed as US/Eastern midnight →
+    UTC. `known_at` = value_time (release schedule is public within days of
+    the report, and the alignment loader stamps the aligned column at the
+    report-date midnight anyway). `rows_written` = len(quarterlyEarnings).
+
+    Raises `AlphaVantageResponseError` for the AV empty-response shape
+    (delisted or unknown ticker), which the ingest loop surfaces via
+    `CHANNEL_FETCH_FAILED`.
+    """
+    quarterly = response.get("quarterlyEarnings")
+    if not isinstance(quarterly, list) or not quarterly:
+        raise AlphaVantageResponseError(
+            "EARNINGS response has no non-empty 'quarterlyEarnings' list"
+        )
+    reported_dates = [row.get("reportedDate") for row in quarterly if row.get("reportedDate")]
+    if not reported_dates:
+        raise AlphaVantageResponseError(
+            "EARNINGS response has no 'reportedDate' fields in quarterlyEarnings"
+        )
+    latest = max(reported_dates)
+    naive_midnight = datetime.strptime(f"{latest} 00:00:00", "%Y-%m-%d %H:%M:%S")
+    value_time = naive_midnight.replace(tzinfo=US_EASTERN_ZONE).astimezone(UTC)
+    return ObservationMetadata(
+        value_time=value_time,
+        known_at=value_time,
+        rows_written=len(quarterly),
+    )
+
+
 def alphavantage_macro_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
     """Extract ObservationMetadata from a macro-series response.
 
@@ -389,6 +426,7 @@ __all__ = [
     "AlphaVantageRateLimitError",
     "AlphaVantageResponseError",
     "alphavantage_bbo_extract_metadata",
+    "alphavantage_earnings_extract_metadata",
     "alphavantage_extract_metadata",
     "alphavantage_index_extract_metadata",
     "alphavantage_macro_extract_metadata",

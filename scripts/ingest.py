@@ -25,9 +25,11 @@ import traceback
 from datetime import date as date_type
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from price_space_llm.alignment.join import _default_macro_params
 from price_space_llm.ingestion.alphavantage import (
+    alphavantage_earnings_extract_metadata,
     alphavantage_extract_metadata,
     alphavantage_index_extract_metadata,
     alphavantage_macro_extract_metadata,
@@ -42,6 +44,12 @@ _MACRO_TOOLS = frozenset(
     {"CPI", "FEDERAL_FUNDS_RATE", "TREASURY_YIELD", "UNEMPLOYMENT", "NONFARM_PAYROLL"}
 )
 _OPTIONS_PER_DATE_TOOLS = frozenset({"HISTORICAL_PUT_CALL_RATIO", "HISTORICAL_OPTIONS"})
+
+# Sprint 048: event tools that need no vendor call (curated static tables + pure
+# date arithmetic). The alignment layer reads these directly; ingest skips them.
+_STATIC_EVENT_TOOLS = frozenset(
+    {"STATIC_FOMC", "STATIC_CPI_RELEASE", "DETERMINISTIC_OPTIONS_EXPIRY"}
+)
 
 _OPTIONS_EXTRACTORS = {
     "HISTORICAL_PUT_CALL_RATIO": alphavantage_put_call_ratio_extract_metadata,
@@ -79,7 +87,7 @@ def _month_range(start: str, end: str) -> list[str]:
     return months
 
 
-def _load_accepted_channels(manifest_path: Path) -> list[dict]:
+def _load_accepted_channels(manifest_path: Path) -> list[dict[str, Any]]:
     """Return the list of accepted channel entries as manifest-shaped dicts.
 
     Fields:
@@ -105,9 +113,24 @@ def _load_accepted_channels(manifest_path: Path) -> list[dict]:
                 "params": c.get("params"),
                 "known_at_lag_days": c.get("known_at_lag_days", 0),
                 "known_at_hour_utc": c.get("known_at_hour_utc", 12),
+                # Sprint 048: EARNINGS iterates a per-symbol constituent list; the
+                # path lives on the channel entry so the manifest is the single
+                # source of truth for what tickers to hit.
+                "constituents_path": c.get("constituents_path"),
+                "static_path": c.get("static_path"),
             }
         )
     return out
+
+
+def _load_constituents(path: Path) -> list[str]:
+    """Load the SPX constituent ticker list from a JSON file with a top-level
+    `tickers` field. Sprint 048."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    tickers = doc.get("tickers")
+    if not isinstance(tickers, list) or not tickers:
+        raise ValueError(f"{path} has no non-empty 'tickers' list")
+    return [str(t) for t in tickers]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -206,12 +229,22 @@ def main(argv: list[str] | None = None) -> int:
         intraday_channels = [c for c in channels if c["tool"] == "TIME_SERIES_INTRADAY"]
         macro_channels = [c for c in channels if c["tool"] in _MACRO_TOOLS]
         options_channels = [c for c in channels if c["tool"] in _OPTIONS_PER_DATE_TOOLS]
+        earnings_channels = [c for c in channels if c["tool"] == "EARNINGS"]
+        static_event_channels = [c for c in channels if c["tool"] in _STATIC_EVENT_TOOLS]
         known_tools = (
-            {"INDEX_DATA", "TIME_SERIES_INTRADAY"}
+            {"INDEX_DATA", "TIME_SERIES_INTRADAY", "EARNINGS"}
             | set(_MACRO_TOOLS)
             | set(_OPTIONS_PER_DATE_TOOLS)
+            | set(_STATIC_EVENT_TOOLS)
         )
         other_channels = [c for c in channels if c["tool"] not in known_tools]
+        if static_event_channels:
+            print(
+                f"ingest: skipping {len(static_event_channels)} static/deterministic event "
+                f"channels; tools={sorted({c['tool'] for c in static_event_channels})} "
+                f"(no vendor call needed; loader reads static tables at align time)",
+                file=sys.stderr,
+            )
         if other_channels:
             print(
                 f"ingest: unsupported tool on {len(other_channels)} channels; "
@@ -297,6 +330,58 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         n_failed += 1
 
+        # Sprint 048: EARNINGS per constituent. EARNINGS_CALENDAR is forward-only,
+        # so historical density comes from iterating the SPX constituent list and
+        # aggregating quarterlyEarnings[].reportedDate at align time. Every ticker
+        # failure emits CHANNEL_FETCH_FAILED and continues; delisted or renamed
+        # tickers surface as ~10-20 fails at close, not silently.
+        if earnings_channels:
+            from price_space_llm.ingestion.alphavantage import AlphaVantageError
+
+            for ch in earnings_channels:
+                cpath = ch.get("constituents_path")
+                if not cpath:
+                    print(
+                        f"ingest[earnings]: channel {ch['channel']}/{ch['symbol']} "
+                        f"has no 'constituents_path'; skipping",
+                        file=sys.stderr,
+                    )
+                    continue
+                try:
+                    constituents = _load_constituents(Path(cpath))
+                except (FileNotFoundError, ValueError) as ex:
+                    print(f"ingest[earnings]: {ex}", file=sys.stderr)
+                    return 1
+                # EARNINGS is a full-history call; there is no per-date semantic
+                # for the fetch. The signal's `sample_date` field is required, so
+                # stamp with today (the date on which we attempted the fetch).
+                today_iso = date_type.today().isoformat()
+                for ticker in constituents:
+                    try:
+                        client.call(
+                            channel=ch["channel"],
+                            symbol=ticker,
+                            tool="EARNINGS",
+                            params={"symbol": ticker, "datatype": "json"},
+                            extract_metadata=alphavantage_earnings_extract_metadata,
+                        )
+                        n_ok += 1
+                    except (IngestionCallFailed, AlphaVantageError) as ex:
+                        emitter.emit(
+                            "CHANNEL_FETCH_FAILED",
+                            source="mcp_av",
+                            channel=ch["channel"],
+                            symbol=ticker,
+                            sample_date=today_iso,
+                            exception_class=type(ex).__name__,
+                            error_message=str(ex),
+                        )
+                        print(
+                            f"ingest[earnings]: FAIL {ticker}: {type(ex).__name__}: {ex}",
+                            file=sys.stderr,
+                        )
+                        n_failed += 1
+
         for month in months:
             for ch in intraday_channels:
                 try:
@@ -330,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
 def _mock_raw_fetcher() -> RawFetcher:
     """Deterministic mock for the --fetcher mock path. Returns a two-bar response."""
 
-    def fetch(tool: str, params: dict) -> dict:
+    def fetch(tool: str, params: dict[str, Any]) -> dict[str, Any]:
         del tool
         return {
             "Meta Data": {"4. Interval": "15min", "6. Time Zone": "US/Eastern"},
