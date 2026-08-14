@@ -236,7 +236,7 @@ Ordering respects dependencies: data before features before model before trainin
 
 | # | Scope | Depends on | GPU |
 |---|---|---|---|
-| 073 | Full-window cost re-calibration: run `scripts/calibrate.py` against 2015-2022 training window (not the 3-month smoke from Sprint 035). Fresh BBO polls or reuse cached snapshots. Fresh `spread_scaler` and `kappa` artifacts. | 042 | no |
+| 073 | Full-window cost re-calibration: refit the transaction-cost model (`spread_scaler` + `kappa`) against the 2015-2022 training window. Requires historical SPY spread data — see "What this plan does not yet resolve" for the three vendor paths. Sprint 035 fit a 3-month smoke against 2024 live data; that scaler cannot cover the 8-year training window without extrapolation. | 042 | no |
 | 074 | Simulator skeleton: `simulation/` dir, `SimResult` dataclass, bar walker over aligned parquet. `SIM_RUN_STARTED`, `SIM_RUN_COMPLETED`, `BAR_PROCESSED`, `PREDICTION_EMITTED` emit sites. | 056, 057, 073 | no |
 | 075 | Decision policy: `edge = expected_return - spread_cost - slippage - risk_penalty`. `risk_penalty = lambda_risk * variance(p)`. Long/short/flat with hysteresis. `DECISION_MADE`, `POSITION_OPENED`, `POSITION_CLOSED`, `TRADE_LEDGERED`, `SIGNAL_DROPPED` emits. | 074 | no |
 | 076 | Simulator metrics + block bootstrap: Sharpe ± SE, 18 non-overlapping monthly blocks × 10,000 resamples, hit rate, max drawdown, time-to-recovery, per-trade P&L histogram. `TRADING_SESSION_STARTED`/`ENDED` per RTH day. | 075 | no |
@@ -256,7 +256,7 @@ Ordering respects dependencies: data before features before model before trainin
 
 | # | Scope | Depends on | GPU |
 |---|---|---|---|
-| 083 | Provision remote GPU (Lambda Labs A10 first for cheap dev, A100 for production sweep points). Sync tokenized parquet + normalizers + bucket_stats + code via git + rsync/S3. Verify one end-to-end training run at xs=1M matches local CPU numbers within numerical noise. First `WANDB_MODE=online` run; real credential. | 060, 063, 083's own provisioning | **yes** |
+| 083 | Provision AWS GPU (g5.xlarge with A10 for cheap dev, p4d for A100 production sweep points). Sync tokenized parquet + normalizers + bucket_stats + code via git + S3. Verify one end-to-end training run at xs=1M matches local CPU numbers within numerical noise. First `WANDB_MODE=online` run; requires WANDB_API_KEY in `.env`. | 060, 063 | **yes** |
 | 084 | Model-size sweep: 4 runs at xs/sm/md/lg on rented A10 or A100. Log to `experiments/logbook.csv`. Report validation NLL/ECE/Brier/RPS curves. | 083 | **yes** |
 | 085 | Context-length sweep at winning model size from Sprint 084: 4 runs at 64/128/256/512. | 084 | **yes** |
 | 086 | Baseline ladder (5 runs): linear, MLP (064), GRU (065), transformer at winning config (084 result), target-only ablation (066), magnitude-weighted ablation. | 064, 065, 066, 085 | **yes** |
@@ -286,6 +286,10 @@ Total: 48 sprints from Sprint 042 through Sprint 090 (some parallelizable within
 
 **What this plan does not do.** No v2 work (multi-instrument) until every v1 gate passes. No v3+ work (alt-data, cross-modal attention, LOB, RL, live paper trading) at all in the current planning horizon. The spec is explicit on both.
 
-**What this plan does not yet resolve.** GPU provider + billing account (Sprint 083). W&B project + credential ownership (Sprint 083). BBO data source for full-window cost re-calibration (Sprint 073) — Sprint 035 used AV's `REALTIME_BULK_BID_ASK_PRICES` for a 3-month smoke; the full window may need cached historical BBO which AV does not carry, or a decision to fit spread scaler on OHLC-derived Corwin-Schultz proxy only.
+**What this plan does not yet resolve.**
+
+- **GPU rental.** Decided 2026-08-13: AWS. Sprint 083 rents an EC2 GPU instance (g5.xlarge for A10 dev at ~$1/hr; p4d.24xlarge or similar for A100 production sweep points).
+- **Weights & Biases account.** W&B is a website that stores each training run's loss curves and validation metrics. Sprint 040 wrote the code that uploads to it; the code works in offline mode without an account. To run online (Sprint 083 onward), someone needs a W&B account, its API key pasted into `.env` as `WANDB_API_KEY=...`, and a project name (default `price-space-llm`). Free tier is enough for v1.
+- **Historical SPY spread data for cost calibration** (Sprint 073). The simulator's cost model subtracts a transaction cost from every simulated trade. That cost is half of the spread between the buy price and sell price on SPY at the trade instant. Sprint 035 pulled today's live spread from Alpha-Vantage for 3 months of 2024 and fit a scaler. To recalibrate against the full 2015-2022 training window, we need historical spread data from that period. Alpha-Vantage does not sell it. Three paths: (a) buy 8 years of SPY historical BBO from Databento (~$100-500), (b) drop ground-truth calibration and estimate spread from bar high/low ranges only via the Corwin-Schultz formula the spec names as a fallback, (c) apply Sprint 035's 2024 coefficient to the training window and assume spread dynamics did not shift across 8 years. Path (a) is the honest one; path (c) is the fastest and weakest.
 
 **Revision policy.** Each sprint closes with its normal card + BLACKBOARD entry. If a sprint surfaces a new gap not in this plan, the plan gets amended in the same commit that files the gap. This document tracks the whole build; sprint cards track each build step.
