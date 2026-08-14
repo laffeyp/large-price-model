@@ -15,6 +15,7 @@ from price_space_llm.alignment.join import (
     enumerate_months,
     load_channel_bars,
     load_index_daily_bars,
+    load_macro_bars,
     run_alignment,
 )
 from price_space_llm.ingestion import cache as _cache
@@ -290,7 +291,11 @@ def test_align_channels_observed_at_this_grid_step_and_age_since_known_at():
     # 14:45 = first-ever observation (fresh); 15:00, 15:15, 15:30 = same known_at as prior
     # (not fresh); 15:45 = new known_at (fresh again).
     assert aligned["observed_at_this_grid_step__target__SPY"].to_list() == [
-        True, False, False, False, True,
+        True,
+        False,
+        False,
+        False,
+        True,
     ]
     # age counter: 0 at 14:45 (fresh), 1 at 15:00, 2 at 15:15, 3 at 15:30, 0 at 15:45.
     assert aligned["age_since_known_at__target__SPY"].to_list() == [0, 1, 2, 3, 0]
@@ -633,6 +638,155 @@ def test_load_index_daily_bars_stamps_known_at_at_market_close(tmp_path: Path):
     assert est_known.hour == 21
     assert est_known.minute == 1
     assert est_known.date() == datetime(2024, 11, 15).date()
+
+
+# load_macro_bars (Sprint 045) ---------------------------------------------
+
+
+def _write_macro_cache(
+    tmp_path: Path, tool: str, channel: str, symbol: str, rows: list[dict]
+) -> Path:
+    """Write a cached macro response (CPI/FEDFUNDS/DGS10/UNRATE/NFP)."""
+    from price_space_llm.alignment.join import _default_macro_params
+
+    params = _default_macro_params(tool)
+    key = _cache.cache_key(tool, channel, symbol, params)
+    path = _cache.cache_path(tmp_path, "mcp_av", tool, key)
+    payload = {
+        "name": f"{symbol} test",
+        "interval": params.get("interval", "monthly"),
+        "unit": "test",
+        "data": rows,
+    }
+    _cache.write(path, payload)
+    return path
+
+
+def test_load_macro_bars_applies_known_at_lag_days(tmp_path: Path):
+    """Sprint 045: known_at = value_time + known_at_lag_days at known_at_hour_utc.
+    A CPI April 2024 reference-month value with 45-day lag should stamp known_at
+    at 2024-05-16 12:00 UTC (April 1 + 45 days = May 16)."""
+    _write_macro_cache(
+        tmp_path,
+        "CPI",
+        "macro",
+        "CPI",
+        [{"date": "2024-04-01", "value": "313.548"}],
+    )
+    from price_space_llm.alignment.join import _default_macro_params
+
+    bars = load_macro_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        tool="CPI",
+        channel="macro",
+        symbol="CPI",
+        params=_default_macro_params("CPI"),
+        known_at_lag_days=45,
+        known_at_hour_utc=12,
+    )
+    assert bars.height == 1
+    known = bars["known_at"][0]
+    assert known.year == 2024
+    assert known.month == 5
+    assert known.day == 16
+    assert known.hour == 16  # 04:00 UTC (00:00 EDT) + 12 hours = 16:00 UTC
+    assert bars["close"][0] == 313.548
+    # Macro rows fill OHLCV with value + 0 for uniform schema.
+    assert bars["open"][0] == bars["close"][0]
+    assert bars["high"][0] == bars["close"][0]
+    assert bars["low"][0] == bars["close"][0]
+    assert bars["volume"][0] == 0
+
+
+def test_load_macro_bars_skips_rows_with_dot_value(tmp_path: Path):
+    """Sprint 045: FRED convention writes '.' for missing macro observations."""
+    _write_macro_cache(
+        tmp_path,
+        "FEDERAL_FUNDS_RATE",
+        "macro",
+        "FEDFUNDS",
+        [
+            {"date": "2024-06-03", "value": "5.33"},
+            {"date": "2024-06-04", "value": "."},
+            {"date": "2024-06-05", "value": "5.33"},
+        ],
+    )
+    from price_space_llm.alignment.join import _default_macro_params
+
+    bars = load_macro_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        tool="FEDERAL_FUNDS_RATE",
+        channel="macro",
+        symbol="FEDFUNDS",
+        params=_default_macro_params("FEDERAL_FUNDS_RATE"),
+        known_at_lag_days=2,
+        known_at_hour_utc=13,
+    )
+    assert bars.height == 2  # dot-value row skipped
+
+
+def test_run_alignment_dispatches_macro_channel(tmp_path: Path):
+    """Sprint 045: manifest tool=CPI routes to load_macro_bars via run_alignment
+    dispatch, and the macro value forward-fills onto every RTH grid bar with
+    known_at <= grid_ts."""
+    _write_cache(
+        tmp_path / "cache",
+        "target",
+        "SPY",
+        "2024-06",
+        {"2024-06-03 09:45:00": _bar(540.0)},
+    )
+    _write_macro_cache(
+        tmp_path / "cache",
+        "CPI",
+        "macro",
+        "CPI",
+        [
+            {"date": "2024-04-01", "value": "313.548"},  # known_at = 2024-05-16 16:00 UTC
+        ],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "target__SPY": {
+                        "channel": "target",
+                        "symbol": "SPY",
+                        "source": "mcp_av",
+                        "tool": "TIME_SERIES_INTRADAY",
+                        "verdict": "accepted",
+                    },
+                    "macro__CPI": {
+                        "channel": "macro",
+                        "symbol": "CPI",
+                        "source": "mcp_av",
+                        "tool": "CPI",
+                        "verdict": "accepted",
+                        "known_at_lag_days": 45,
+                        "known_at_hour_utc": 12,
+                    },
+                }
+            }
+        )
+    )
+    output = tmp_path / "aligned.parquet"
+    e = _fresh_emitter(max_buffer=32768)
+    run_alignment(
+        manifest_path=manifest_path,
+        cache_dir=tmp_path / "cache",
+        months=["2024-06"],
+        output_path=output,
+        emitter=e,
+        run_id="test-align-macro",
+    )
+    aligned = pl.read_parquet(output)
+    # The April 2024 CPI value (known_at May 16) is visible on every June 2024 RTH bar.
+    non_null = aligned.filter(pl.col("macro__CPI__close").is_not_null())
+    assert non_null.height > 0
+    assert non_null["macro__CPI__close"].unique().to_list() == [313.548]
 
 
 def test_load_index_daily_bars_raises_on_empty_data(tmp_path: Path):

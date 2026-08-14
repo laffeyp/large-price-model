@@ -17,6 +17,7 @@ from price_space_llm.alignment.join import (
     enumerate_months,
     load_channel_bars,
     load_index_daily_bars,
+    load_macro_bars,
     run_alignment,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "enumerate_months",
     "load_channel_bars",
     "load_index_daily_bars",
+    "load_macro_bars",
     "run_alignment",
 ]

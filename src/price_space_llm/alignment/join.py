@@ -156,6 +156,95 @@ def load_index_daily_bars(
     return pl.DataFrame(rows).sort("known_at")
 
 
+def load_macro_bars(
+    cache_dir: Path,
+    source: str,
+    tool: str,
+    channel: str,
+    symbol: str,
+    params: dict[str, Any],
+    known_at_lag_days: int,
+    known_at_hour_utc: int,
+) -> pl.DataFrame:
+    """Read a cached macro response (CPI, FEDFUNDS, DGS10, UNRATE, NFP) and
+    return bars in the same `{known_at, open, high, low, close, volume, channel,
+    symbol}` shape the intraday and index loaders use.
+
+    Macro endpoints return `{"data": [{"date", "value"}, ...]}` where `date` is
+    the reference-period start (`value_time`), NOT the release date. Spec §Data
+    time semantics: `known_at = released_at`. This loader approximates
+    `known_at = value_time + known_at_lag_days at known_at_hour_utc` per the
+    per-channel manifest values. Approximation loses a few days on any given
+    row but preserves ordinal ordering; the trainer sees "roughly-right when
+    it became public" per spec's release-calendar intent.
+
+    Macro rows carry a single `value`; the loader writes it into all four
+    OHLC fields and sets `volume=0`, keeping the aligned parquet schema
+    uniform across channels. Downstream feature computation reads `close`.
+    """
+    key = _cache.cache_key(tool, channel, symbol, params)
+    path = _cache.cache_path(cache_dir, source, tool, key)
+    payload = _cache.read(path)
+    if payload is None:
+        raise FileNotFoundError(f"cache miss for {channel}/{symbol}: {path}")
+
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        raise ValueError(f"macro response for {channel}/{symbol} has no non-empty 'data' list")
+
+    rows: list[dict[str, Any]] = []
+    for row in data:
+        date_str = row.get("date")
+        value_str = row.get("value")
+        if not date_str or value_str in (None, "", "."):
+            continue
+        try:
+            value = float(value_str)
+        except ValueError:
+            continue
+        naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        value_time_utc = naive_midnight.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+        known_at = value_time_utc + timedelta(days=known_at_lag_days, hours=known_at_hour_utc)
+        rows.append(
+            {
+                "known_at": known_at,
+                "open": value,
+                "high": value,
+                "low": value,
+                "close": value,
+                "volume": 0,
+                "channel": channel,
+                "symbol": symbol,
+            }
+        )
+
+    return pl.DataFrame(rows).sort("known_at")
+
+
+_MACRO_TOOLS = {
+    "CPI",
+    "FEDERAL_FUNDS_RATE",
+    "TREASURY_YIELD",
+    "UNEMPLOYMENT",
+    "NONFARM_PAYROLL",
+}
+
+
+def _default_macro_params(tool: str) -> dict[str, Any]:
+    """Default per-tool params matching the AV endpoint defaults + spec §Channels
+    choices (daily for FEDFUNDS/TREASURY_YIELD; 10year maturity for TREASURY_YIELD).
+    """
+    if tool == "CPI":
+        return {"interval": "monthly", "datatype": "json"}
+    if tool == "FEDERAL_FUNDS_RATE":
+        return {"interval": "daily", "datatype": "json"}
+    if tool == "TREASURY_YIELD":
+        return {"interval": "daily", "maturity": "10year", "datatype": "json"}
+    if tool in ("UNEMPLOYMENT", "NONFARM_PAYROLL"):
+        return {"datatype": "json"}
+    raise ValueError(f"no default params for tool {tool!r}")
+
+
 def _us_eastern_zone() -> tzinfo:
     """Return a real US/Eastern zone with DST via stdlib zoneinfo. Sprint 043."""
     return US_EASTERN_ZONE
@@ -415,6 +504,20 @@ def run_alignment(
                 )
                 per_month.append(bars)
             combined = pl.concat(per_month).unique(subset="known_at").sort("known_at")
+        elif tool in _MACRO_TOOLS:
+            # Sprint 045: five macro endpoints share one loader; per-channel manifest
+            # supplies known_at_lag_days + known_at_hour_utc + tool-specific params.
+            params = c.get("params") or _default_macro_params(tool)
+            combined = load_macro_bars(
+                cache_dir=cache_dir,
+                source=c["source"],
+                tool=tool,
+                channel=c["channel"],
+                symbol=c["symbol"],
+                params=params,
+                known_at_lag_days=int(c.get("known_at_lag_days", 0)),
+                known_at_hour_utc=int(c.get("known_at_hour_utc", 12)),
+            )
         else:
             raise ValueError(f"unsupported tool {tool!r} on channel {c['channel']}/{c['symbol']}")
         channel_bars[f"{c['channel']}__{c['symbol']}"] = combined

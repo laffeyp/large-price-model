@@ -326,6 +326,34 @@ def alphavantage_index_extract_metadata(response: dict[str, Any]) -> Observation
     )
 
 
+def alphavantage_macro_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
+    """Extract ObservationMetadata from a macro-series response.
+
+    Sprint 045: covers the five macro endpoints — CPI, FEDERAL_FUNDS_RATE,
+    TREASURY_YIELD, UNEMPLOYMENT, NONFARM_PAYROLL. All return the same shape:
+    `{"name", "interval", "unit", "data": [{"date", "value"}, ...]}`.
+
+    `value_time` is the latest row's `date` treated as a US/Eastern date at
+    00:00 → UTC. `known_at` is the same instant — the release-lag adjustment
+    that turns `value_time` into a real `known_at` lives on the alignment
+    loader, not here (loader reads the per-channel `known_at_lag_days` and
+    `known_at_hour_utc` from the manifest). `rows_written` is `len(data)`.
+    """
+    data = response.get("data")
+    if not isinstance(data, list) or not data:
+        raise AlphaVantageResponseError("macro response has no non-empty 'data' list")
+    date_str = data[0].get("date")
+    if not date_str:
+        raise AlphaVantageResponseError("macro row missing 'date' field")
+    naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+    value_time = naive_midnight.replace(tzinfo=US_EASTERN_ZONE).astimezone(UTC)
+    return ObservationMetadata(
+        value_time=value_time,
+        known_at=value_time,
+        rows_written=len(data),
+    )
+
+
 __all__ = [
     "EXPECTED_BARS_PER_TRADING_MONTH",
     "AlphaVantageError",
@@ -334,6 +362,7 @@ __all__ = [
     "alphavantage_bbo_extract_metadata",
     "alphavantage_extract_metadata",
     "alphavantage_index_extract_metadata",
+    "alphavantage_macro_extract_metadata",
     "alphavantage_options_extract_metadata",
     "make_alphavantage_fetcher",
     "make_alphavantage_raw_fetcher",

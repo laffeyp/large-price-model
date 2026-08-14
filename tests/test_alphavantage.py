@@ -11,6 +11,7 @@ from price_space_llm.ingestion.alphavantage import (
     AlphaVantageResponseError,
     alphavantage_extract_metadata,
     alphavantage_index_extract_metadata,
+    alphavantage_macro_extract_metadata,
     make_alphavantage_fetcher,
     make_alphavantage_raw_fetcher,
 )
@@ -312,3 +313,41 @@ def test_index_extract_metadata_raises_on_missing_data_key():
 def test_index_extract_metadata_raises_on_row_without_date():
     with pytest.raises(AlphaVantageResponseError, match="missing 'date' field"):
         alphavantage_index_extract_metadata({"symbol": "VIX", "data": [{"close": "12.5"}]})
+
+
+# Macro extractor (Sprint 045) ---------------------------------------------
+
+
+def _canned_macro(n_rows: int = 3) -> dict:
+    return {
+        "name": "Consumer Price Index",
+        "interval": "monthly",
+        "unit": "index 1982-1984=100",
+        "data": [{"date": f"2024-{6 - i:02d}-01", "value": f"{300.0 + i}"} for i in range(n_rows)],
+    }
+
+
+def test_macro_extract_metadata_uses_latest_row_date():
+    """Latest row 2024-06-01 sits in EDT; midnight local -> 04:00 UTC. Sprint 045."""
+    meta = alphavantage_macro_extract_metadata(_canned_macro(n_rows=5))
+    assert meta.rows_written == 5
+    assert meta.value_time.year == 2024
+    assert meta.value_time.month == 6
+    assert meta.value_time.day == 1
+    assert meta.value_time.hour == 4  # 00:00 EDT = 04:00 UTC
+    assert meta.known_at == meta.value_time
+
+
+def test_macro_extract_metadata_raises_on_empty_data():
+    with pytest.raises(AlphaVantageResponseError, match="no non-empty 'data' list"):
+        alphavantage_macro_extract_metadata({"name": "CPI", "data": []})
+
+
+def test_macro_extract_metadata_raises_on_missing_data_key():
+    with pytest.raises(AlphaVantageResponseError, match="no non-empty 'data' list"):
+        alphavantage_macro_extract_metadata({"name": "CPI"})
+
+
+def test_macro_extract_metadata_raises_on_row_without_date():
+    with pytest.raises(AlphaVantageResponseError, match="missing 'date' field"):
+        alphavantage_macro_extract_metadata({"name": "CPI", "data": [{"value": "300.0"}]})

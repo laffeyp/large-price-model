@@ -24,13 +24,19 @@ import time
 import traceback
 from pathlib import Path
 
+from price_space_llm.alignment.join import _default_macro_params
 from price_space_llm.ingestion.alphavantage import (
     alphavantage_extract_metadata,
     alphavantage_index_extract_metadata,
+    alphavantage_macro_extract_metadata,
     make_alphavantage_raw_fetcher,
 )
 from price_space_llm.ingestion.client import IngestionCallFailed, IngestionClient, RawFetcher
 from price_space_llm.script_harness import script_session
+
+_MACRO_TOOLS = frozenset(
+    {"CPI", "FEDERAL_FUNDS_RATE", "TREASURY_YIELD", "UNEMPLOYMENT", "NONFARM_PAYROLL"}
+)
 
 
 def _month_range(start: str, end: str) -> list[str]:
@@ -50,24 +56,30 @@ def _month_range(start: str, end: str) -> list[str]:
     return months
 
 
-def _load_accepted_channels(manifest_path: Path) -> list[dict[str, str]]:
-    """Return the list of {channel, symbol, source, tool} entries with verdict=accepted.
+def _load_accepted_channels(manifest_path: Path) -> list[dict]:
+    """Return the list of accepted channel entries as manifest-shaped dicts.
 
-    `tool` defaults to `TIME_SERIES_INTRADAY` when unset in the manifest.
-    Sprint 038 added per-channel tool dispatch so INDEX_DATA channels (VIX)
-    can coexist with TIME_SERIES_INTRADAY channels (SPY) in one pull.
+    `tool` defaults to `TIME_SERIES_INTRADAY` when unset. Sprint 045: macro
+    channels carry `params`, `known_at_lag_days`, and `known_at_hour_utc`
+    fields that pass through untouched.
     """
     doc = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return [
-        {
-            "channel": c["channel"],
-            "symbol": c["symbol"],
-            "source": c["source"],
-            "tool": c.get("tool", "TIME_SERIES_INTRADAY"),
-        }
-        for c in doc["channels"].values()
-        if c.get("verdict") == "accepted"
-    ]
+    out = []
+    for c in doc["channels"].values():
+        if c.get("verdict") != "accepted":
+            continue
+        out.append(
+            {
+                "channel": c["channel"],
+                "symbol": c["symbol"],
+                "source": c["source"],
+                "tool": c.get("tool", "TIME_SERIES_INTRADAY"),
+                "params": c.get("params"),
+                "known_at_lag_days": c.get("known_at_lag_days", 0),
+                "known_at_hour_utc": c.get("known_at_hour_utc", 12),
+            }
+        )
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,9 +169,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         index_channels = [c for c in channels if c["tool"] == "INDEX_DATA"]
         intraday_channels = [c for c in channels if c["tool"] == "TIME_SERIES_INTRADAY"]
-        other_channels = [
-            c for c in channels if c["tool"] not in {"INDEX_DATA", "TIME_SERIES_INTRADAY"}
-        ]
+        macro_channels = [c for c in channels if c["tool"] in _MACRO_TOOLS]
+        known_tools = {"INDEX_DATA", "TIME_SERIES_INTRADAY"} | set(_MACRO_TOOLS)
+        other_channels = [c for c in channels if c["tool"] not in known_tools]
         if other_channels:
             print(
                 f"ingest: unsupported tool on {len(other_channels)} channels; "
@@ -180,6 +192,21 @@ def main(argv: list[str] | None = None) -> int:
                         "datatype": "json",
                     },
                     extract_metadata=alphavantage_index_extract_metadata,
+                )
+                n_ok += 1
+            except IngestionCallFailed:
+                traceback.print_exc(file=sys.stderr)
+                n_failed += 1
+                exit_code = 2
+
+        for ch in macro_channels:
+            try:
+                client.call(
+                    channel=ch["channel"],
+                    symbol=ch["symbol"],
+                    tool=ch["tool"],
+                    params=ch.get("params") or _default_macro_params(ch["tool"]),
+                    extract_metadata=alphavantage_macro_extract_metadata,
                 )
                 n_ok += 1
             except IngestionCallFailed:
