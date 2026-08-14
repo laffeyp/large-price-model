@@ -78,7 +78,7 @@ def test_fetcher_missing_fraction_scales_with_bar_count():
 
 
 def test_fetcher_normalises_us_eastern_to_utc():
-    """A 09:30 US-Eastern bar becomes 14:30 UTC under the EST -5 fixed offset."""
+    """A 09:30 US-Eastern bar in June (EDT, UTC-4) becomes 13:30 UTC. Sprint 043."""
 
     def handler(request):
         return httpx.Response(
@@ -99,7 +99,7 @@ def test_fetcher_normalises_us_eastern_to_utc():
 
     fetcher = make_alphavantage_fetcher("k", client=_client_with(handler))
     result = fetcher("target", "SPY", "mcp_av", date(2015, 6, 15))
-    assert result.earliest_timestamp == "2015-06-15T14:30:00+00:00"
+    assert result.earliest_timestamp == "2015-06-15T13:30:00+00:00"
 
 
 def test_fetcher_raises_on_error_message_payload():
@@ -287,15 +287,14 @@ def _canned_index_daily(n_rows: int = 3) -> dict:
     }
 
 
-def test_index_extract_metadata_uses_16_est_close():
-    """Latest row's date at 16:00 US/Eastern → UTC = 21:00. known_at = value_time + 1min."""
+def test_index_extract_metadata_uses_16_market_close_edt():
+    """Latest row 2024-06-28 sits in EDT. 16:00 US/Eastern → UTC = 20:00. Sprint 043."""
     meta = alphavantage_index_extract_metadata(_canned_index_daily(n_rows=5))
     assert meta.rows_written == 5
-    # Latest row date: 2024-06-28. 16:00 US/Eastern (fixed -5) → 21:00 UTC.
     assert meta.value_time.year == 2024
     assert meta.value_time.month == 6
     assert meta.value_time.day == 28
-    assert meta.value_time.hour == 21
+    assert meta.value_time.hour == 20
     assert meta.value_time.minute == 0
     assert (meta.known_at - meta.value_time).total_seconds() == 60.0
 

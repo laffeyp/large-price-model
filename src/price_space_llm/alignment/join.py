@@ -5,11 +5,12 @@ channel whose `known_at <= grid_ts`. `strategy="backward"` is the
 alignment invariant — it enforces that features at time T can only see
 data known at or before T. Look-ahead leakage is impossible by construction.
 
-Simplifications documented on `## Drift watchlist` (2026-08-11):
-- Fixed EST offset (-5) via `alphavantage.US_EASTERN_OFFSET`; DST in
-  June 2024 means the newest bar's UTC time is +1h off the true value.
-  Cache bars and grid bars use the SAME offset, so the join still aligns
-  correctly; only the emitted timestamps carry the +1h bias.
+Simplifications:
+- Sprint 043: real US/Eastern zone via `zoneinfo("America/New_York")` shared
+  with `alphavantage.US_EASTERN_ZONE`. DST correct; a March bar reports UTC-4
+  and a November bar reports UTC-5. Cache bars and grid bars flow through the
+  same zone, so the join stays internally consistent AND the UTC labels match
+  reality.
 - Weekday-only calendar (Mon-Fri, no holidays). US market holidays
   (Juneteenth, July 4, etc.) still get grid bars; if the vendor returned
   no data on those days, `AS_OF_JOIN_MISS` fires for each grid bar.
@@ -19,14 +20,14 @@ Simplifications documented on `## Drift watchlist` (2026-08-11):
 import json
 import time
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
 from price_space_llm.ingestion import cache as _cache
-from price_space_llm.ingestion.alphavantage import US_EASTERN_OFFSET
+from price_space_llm.ingestion.alphavantage import US_EASTERN_ZONE
 from price_space_llm.signals import StrictSignalEmitter
 
 # RTH in US/Eastern per tech-arch §5: 09:30 open → 16:00 close.
@@ -156,8 +157,8 @@ def load_index_daily_bars(
 
 
 def _us_eastern_zone() -> tzinfo:
-    """Return a fixed-offset US/Eastern tzinfo matching `alphavantage.US_EASTERN_OFFSET`."""
-    return timezone(US_EASTERN_OFFSET)
+    """Return a real US/Eastern zone with DST via stdlib zoneinfo. Sprint 043."""
+    return US_EASTERN_ZONE
 
 
 def build_rth_grid(start: date, end: date) -> pl.DataFrame:

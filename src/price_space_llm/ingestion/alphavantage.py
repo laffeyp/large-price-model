@@ -21,8 +21,9 @@ Response normalisation:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -30,7 +31,9 @@ from price_space_llm.ingestion.client import ObservationMetadata, RawFetcher
 from price_space_llm.ingestion.probe import Fetcher, FetchResult
 
 ALPHAVANTAGE_BASE_URL = "https://www.alphavantage.co"
-US_EASTERN_OFFSET = timedelta(hours=-5)  # EST base; DST handling deferred to a real tz library
+# Sprint 043: real US/Eastern zone with DST via stdlib zoneinfo. Replaces a fixed
+# -5 offset that mislabelled every EDT-months bar by one hour.
+US_EASTERN_ZONE = ZoneInfo("America/New_York")
 EXPECTED_BARS_PER_TRADING_MONTH = 21 * 26  # rough heuristic; refined later
 
 
@@ -56,11 +59,11 @@ def _strip_ordinal(key: str) -> str:
 def _to_utc_iso(us_eastern_ts: str) -> str:
     """Parse `'YYYY-MM-DD HH:MM:SS'` in US/Eastern and return an ISO-8601 UTC string.
 
-    DST is a real concern; this rough conversion uses a fixed EST offset.
-    A later sprint swaps in zoneinfo("America/New_York") for correctness.
+    Sprint 043: uses `zoneinfo("America/New_York")` so DST switches produce the
+    correct UTC offset (-4 during EDT, -5 during EST).
     """
     naive = datetime.strptime(us_eastern_ts, "%Y-%m-%d %H:%M:%S")
-    us_eastern = naive.replace(tzinfo=timezone(US_EASTERN_OFFSET))
+    us_eastern = naive.replace(tzinfo=US_EASTERN_ZONE)
     return us_eastern.astimezone(UTC).isoformat()
 
 
@@ -229,7 +232,7 @@ def alphavantage_extract_metadata(response: dict[str, Any]) -> ObservationMetada
         )
     latest_us_eastern = max(series.keys())
     naive = datetime.strptime(latest_us_eastern, "%Y-%m-%d %H:%M:%S")
-    value_time = naive.replace(tzinfo=timezone(US_EASTERN_OFFSET)).astimezone(UTC)
+    value_time = naive.replace(tzinfo=US_EASTERN_ZONE).astimezone(UTC)
     known_at = value_time + timedelta(minutes=1)
     return ObservationMetadata(
         value_time=value_time,
@@ -258,7 +261,7 @@ def alphavantage_options_extract_metadata(response: dict[str, Any]) -> Observati
     if not date_str:
         raise AlphaVantageResponseError("options row missing 'date' field")
     naive_close = datetime.strptime(f"{date_str} 20:00:00", "%Y-%m-%d %H:%M:%S")
-    value_time = naive_close.replace(tzinfo=timezone(US_EASTERN_OFFSET)).astimezone(UTC)
+    value_time = naive_close.replace(tzinfo=US_EASTERN_ZONE).astimezone(UTC)
     known_at = value_time + timedelta(hours=2)
     return ObservationMetadata(
         value_time=value_time,
@@ -314,7 +317,7 @@ def alphavantage_index_extract_metadata(response: dict[str, Any]) -> Observation
     if not date_str:
         raise AlphaVantageResponseError("INDEX_DATA row missing 'date' field")
     naive_close = datetime.strptime(f"{date_str} 16:00:00", "%Y-%m-%d %H:%M:%S")
-    value_time = naive_close.replace(tzinfo=timezone(US_EASTERN_OFFSET)).astimezone(UTC)
+    value_time = naive_close.replace(tzinfo=US_EASTERN_ZONE).astimezone(UTC)
     known_at = value_time + timedelta(minutes=1)
     return ObservationMetadata(
         value_time=value_time,

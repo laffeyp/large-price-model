@@ -78,13 +78,81 @@ def test_grid_spans_multiple_weekdays():
     assert grid.height == 130
 
 
-def test_grid_bars_are_utc_aware():
+def test_grid_bars_are_utc_aware_edt():
+    """Sprint 043: June sits in EDT (UTC-4). 09:45 EDT = 13:45 UTC."""
     grid = build_rth_grid(date(2024, 6, 3), date(2024, 6, 3))
     first_ts = grid["grid_ts"][0]
     assert first_ts.tzinfo is not None
-    # 09:45 US/Eastern with fixed -5 offset → 14:45 UTC
+    assert first_ts.hour == 13
+    assert first_ts.minute == 45
+
+
+def test_grid_bars_are_utc_aware_est():
+    """Sprint 043: November after the DST change sits in EST (UTC-5). 09:45 EST = 14:45 UTC."""
+    grid = build_rth_grid(date(2024, 11, 4), date(2024, 11, 4))
+    first_ts = grid["grid_ts"][0]
+    assert first_ts.tzinfo is not None
     assert first_ts.hour == 14
     assert first_ts.minute == 45
+
+
+def test_load_channel_bars_dst_roundtrip(tmp_path: Path):
+    """Sprint 043: a March EDT bar and a November EST bar both round-trip to correct UTC."""
+    _write_cache(
+        tmp_path,
+        "target",
+        "SPY",
+        "2024-03",
+        {
+            "2024-03-15 09:45:00": _bar(510.0),  # EDT: 13:45 UTC
+        },
+    )
+    edt = load_channel_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        tool="TIME_SERIES_INTRADAY",
+        channel="target",
+        symbol="SPY",
+        params={
+            "symbol": "SPY",
+            "interval": "15min",
+            "month": "2024-03",
+            "outputsize": "full",
+            "datatype": "json",
+        },
+    )
+    edt_known = edt["known_at"][0]
+    assert edt_known.hour == 13
+    assert edt_known.minute == 46  # bar_close + 1 minute per Sprint 024
+    assert edt_known.date() == datetime(2024, 3, 15).date()
+
+    _write_cache(
+        tmp_path,
+        "target",
+        "SPY",
+        "2024-11",
+        {
+            "2024-11-15 09:45:00": _bar(590.0),  # EST: 14:45 UTC
+        },
+    )
+    est = load_channel_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        tool="TIME_SERIES_INTRADAY",
+        channel="target",
+        symbol="SPY",
+        params={
+            "symbol": "SPY",
+            "interval": "15min",
+            "month": "2024-11",
+            "outputsize": "full",
+            "datatype": "json",
+        },
+    )
+    est_known = est["known_at"][0]
+    assert est_known.hour == 14
+    assert est_known.minute == 46
+    assert est_known.date() == datetime(2024, 11, 15).date()
 
 
 # load_channel_bars ---------------------------------------------------------
@@ -532,8 +600,11 @@ def _write_index_cache(tmp_path: Path, channel: str, symbol: str, rows: list[dic
     return path
 
 
-def test_load_index_daily_bars_stamps_known_at_at_21_utc(tmp_path: Path):
-    """VIX daily close at 16:00 US/Eastern (fixed -5) → 21:00 UTC; known_at = +1min."""
+def test_load_index_daily_bars_stamps_known_at_at_market_close(tmp_path: Path):
+    """VIX daily close at 16:00 US/Eastern under real DST rules.
+    June (EDT, UTC-4): 16:00 US/Eastern = 20:00 UTC; known_at = 20:01 UTC.
+    November (EST, UTC-5): 16:00 US/Eastern = 21:00 UTC; known_at = 21:01 UTC.
+    """
     _write_index_cache(
         tmp_path,
         "market_context",
@@ -541,6 +612,7 @@ def test_load_index_daily_bars_stamps_known_at_at_21_utc(tmp_path: Path):
         [
             {"date": "2024-06-28", "open": "12.5", "high": "13.0", "low": "12.4", "close": "12.55"},
             {"date": "2024-06-27", "open": "12.6", "high": "12.9", "low": "12.5", "close": "12.60"},
+            {"date": "2024-11-15", "open": "14.0", "high": "14.5", "low": "13.9", "close": "14.20"},
         ],
     )
     bars = load_index_daily_bars(
@@ -551,12 +623,16 @@ def test_load_index_daily_bars_stamps_known_at_at_21_utc(tmp_path: Path):
         symbol="VIX",
         params={"symbol": "VIX", "interval": "daily", "datatype": "json"},
     )
-    assert bars.height == 2
-    assert bars["close"].to_list() == [12.60, 12.55]  # sorted by known_at ascending
-    first_known = bars["known_at"][0]
-    assert first_known.hour == 21
-    assert first_known.minute == 1
-    assert first_known.date() == datetime(2024, 6, 27).date()
+    assert bars.height == 3
+    # Bars are sorted by known_at; June (EDT) rows precede the November (EST) row.
+    edt_known = bars.filter(pl.col("close") == 12.60)["known_at"][0]
+    assert edt_known.hour == 20
+    assert edt_known.minute == 1
+    assert edt_known.date() == datetime(2024, 6, 27).date()
+    est_known = bars.filter(pl.col("close") == 14.20)["known_at"][0]
+    assert est_known.hour == 21
+    assert est_known.minute == 1
+    assert est_known.date() == datetime(2024, 11, 15).date()
 
 
 def test_load_index_daily_bars_raises_on_empty_data(tmp_path: Path):
