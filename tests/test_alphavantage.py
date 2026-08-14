@@ -12,6 +12,7 @@ from price_space_llm.ingestion.alphavantage import (
     alphavantage_extract_metadata,
     alphavantage_index_extract_metadata,
     alphavantage_macro_extract_metadata,
+    alphavantage_put_call_ratio_extract_metadata,
     make_alphavantage_fetcher,
     make_alphavantage_raw_fetcher,
 )
@@ -351,3 +352,41 @@ def test_macro_extract_metadata_raises_on_missing_data_key():
 def test_macro_extract_metadata_raises_on_row_without_date():
     with pytest.raises(AlphaVantageResponseError, match="missing 'date' field"):
         alphavantage_macro_extract_metadata({"name": "CPI", "data": [{"value": "300.0"}]})
+
+
+# Put/call ratio extractor (Sprint 046) ------------------------------------
+
+
+def test_pcr_extract_metadata_parses_date_and_value():
+    """Sprint 046: HISTORICAL_PUT_CALL_RATIO response's date parsed as EDT midnight."""
+    meta = alphavantage_put_call_ratio_extract_metadata(
+        {
+            "symbol": "SPY",
+            "date": "2022-06-15",
+            "put_call_ratio_full_chain": "1.16",
+            "put_call_ratio_by_expiration": [],
+        }
+    )
+    assert meta.rows_written == 1
+    assert meta.value_time.year == 2022
+    assert meta.value_time.month == 6
+    assert meta.value_time.day == 15
+    assert meta.value_time.hour == 4  # 00:00 EDT = 04:00 UTC
+    assert meta.known_at == meta.value_time
+
+
+def test_pcr_extract_metadata_raises_on_latest_date():
+    """The 'latest' sentinel means the caller did not pin a real date; refuse."""
+    with pytest.raises(AlphaVantageResponseError, match="no explicit date"):
+        alphavantage_put_call_ratio_extract_metadata(
+            {"symbol": "SPY", "date": "latest", "put_call_ratio_full_chain": "0.95"}
+        )
+
+
+def test_pcr_extract_metadata_raises_on_null_value():
+    """Holidays return put_call_ratio_full_chain=null; extractor raises so the ingest
+    caller can skip and let the aligned parquet's missing_mask surface the gap."""
+    with pytest.raises(AlphaVantageResponseError, match="missing 'put_call_ratio_full_chain'"):
+        alphavantage_put_call_ratio_extract_metadata(
+            {"symbol": "SPY", "date": "2024-06-19", "put_call_ratio_full_chain": None}
+        )

@@ -81,11 +81,16 @@ class IngestionClient:
         fallback: RawFetcher | None = None,
         fallback_source: str | None = None,
         rate_limit_per_minute: int = 75,
+        rate_limit_behavior: str = "raise",
         run_id: str = "unknown",
         git_sha: str = "0" * 40,
     ) -> None:
         if (fallback is None) != (fallback_source is None):
             raise ValueError("fallback and fallback_source must both be set or both None")
+        if rate_limit_behavior not in ("raise", "block"):
+            raise ValueError(
+                f"rate_limit_behavior must be 'raise' or 'block'; got {rate_limit_behavior!r}"
+            )
         self._primary = primary
         self._primary_source = primary_source
         self._fallback = fallback
@@ -94,10 +99,18 @@ class IngestionClient:
         self._emitter = emitter
         self._run_id = run_id
         self._git_sha = git_sha
+        self._rate_limit_behavior = rate_limit_behavior
         self._primary_bucket = TokenBucket(rate_limit_per_minute, 60.0, clock)
         self._fallback_bucket = (
             TokenBucket(rate_limit_per_minute, 60.0, clock) if fallback is not None else None
         )
+
+    def _acquire(self, bucket: TokenBucket) -> None:
+        """Acquire a token; block or raise per constructor config."""
+        if self._rate_limit_behavior == "block":
+            bucket.acquire_blocking()
+        else:
+            bucket.acquire()
 
     def call(
         self,
@@ -207,7 +220,7 @@ class IngestionClient:
     ) -> tuple[dict[str, Any], str, str | None]:
         """Try primary, then fallback if configured. Returns (response, source_used, prior_hash)."""
         try:
-            self._primary_bucket.acquire()
+            self._acquire(self._primary_bucket)
             self._emitter.emit(
                 "INGESTION_CALL_ISSUED",
                 source=self._primary_source,
@@ -235,7 +248,7 @@ class IngestionClient:
                 reason=_map_reason(primary_exc),
             )
             try:
-                self._fallback_bucket.acquire()
+                self._acquire(self._fallback_bucket)
                 self._emitter.emit(
                     "INGESTION_CALL_ISSUED",
                     source=self._fallback_source,

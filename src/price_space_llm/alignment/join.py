@@ -221,6 +221,72 @@ def load_macro_bars(
     return pl.DataFrame(rows).sort("known_at")
 
 
+def load_put_call_ratio_bars(
+    cache_dir: Path,
+    source: str,
+    symbol: str,
+    channel: str,
+    known_at_lag_days: int,
+    known_at_hour_utc: int,
+) -> pl.DataFrame:
+    """Read all cached HISTORICAL_PUT_CALL_RATIO responses for `symbol` and return
+    bars in the standard `{known_at, open, high, low, close, volume, channel,
+    symbol}` shape.
+
+    Sprint 046: unlike macros and index-data, this endpoint returns ONE date per
+    call and each date lands in a distinct cache file. The loader walks the
+    HISTORICAL_PUT_CALL_RATIO cache directory, filters to responses matching
+    `symbol`, and constructs a per-date time series.
+
+    `known_at = value_time + known_at_lag_days at known_at_hour_utc`.
+    Value used = `put_call_ratio_full_chain`; the per-expiration breakdown is
+    ignored for v1. OHLC filled with the same value; volume = 0.
+    """
+    tool_dir = cache_dir / source / "HISTORICAL_PUT_CALL_RATIO"
+    if not tool_dir.exists():
+        raise FileNotFoundError(
+            f"no HISTORICAL_PUT_CALL_RATIO cache directory at {tool_dir}"
+        )
+
+    rows: list[dict[str, Any]] = []
+    for cache_file in tool_dir.glob("*.json"):
+        if cache_file.name.endswith(".meta.json"):
+            continue
+        payload = _cache.read(cache_file)
+        if payload is None:
+            continue
+        if payload.get("symbol") != symbol:
+            continue
+        date_str = payload.get("date")
+        value = payload.get("put_call_ratio_full_chain")
+        if not date_str or date_str == "latest" or value is None:
+            continue
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            continue
+        naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        value_time_utc = naive_midnight.replace(tzinfo=_us_eastern_zone()).astimezone(UTC)
+        known_at = value_time_utc + timedelta(days=known_at_lag_days, hours=known_at_hour_utc)
+        rows.append(
+            {
+                "known_at": known_at,
+                "open": v,
+                "high": v,
+                "low": v,
+                "close": v,
+                "volume": 0,
+                "channel": channel,
+                "symbol": symbol,
+            }
+        )
+    if not rows:
+        raise ValueError(
+            f"no HISTORICAL_PUT_CALL_RATIO cache rows matched symbol={symbol!r} in {tool_dir}"
+        )
+    return pl.DataFrame(rows).sort("known_at").unique(subset="known_at")
+
+
 _MACRO_TOOLS = {
     "CPI",
     "FEDERAL_FUNDS_RATE",
@@ -517,6 +583,17 @@ def run_alignment(
                 params=params,
                 known_at_lag_days=int(c.get("known_at_lag_days", 0)),
                 known_at_hour_utc=int(c.get("known_at_hour_utc", 12)),
+            )
+        elif tool == "HISTORICAL_PUT_CALL_RATIO":
+            # Sprint 046: one endpoint call per date; loader walks the cache dir
+            # to build the full time series from many single-date cache files.
+            combined = load_put_call_ratio_bars(
+                cache_dir=cache_dir,
+                source=c["source"],
+                symbol=c["symbol"],
+                channel=c["channel"],
+                known_at_lag_days=int(c.get("known_at_lag_days", 1)),
+                known_at_hour_utc=int(c.get("known_at_hour_utc", 13)),
             )
         else:
             raise ValueError(f"unsupported tool {tool!r} on channel {c['channel']}/{c['symbol']}")

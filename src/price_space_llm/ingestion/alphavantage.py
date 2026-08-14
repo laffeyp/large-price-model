@@ -326,6 +326,35 @@ def alphavantage_index_extract_metadata(response: dict[str, Any]) -> Observation
     )
 
 
+def alphavantage_put_call_ratio_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
+    """Extract ObservationMetadata from a HISTORICAL_PUT_CALL_RATIO response.
+
+    Sprint 046: the endpoint returns `{"symbol", "date",
+    "put_call_ratio_full_chain", "put_call_ratio_by_expiration": [...]}`
+    per date. `value_time` = the response's `date` field parsed as
+    US/Eastern midnight → UTC. `known_at` = value_time (release-lag
+    applied by the alignment loader per manifest offsets). `rows_written`
+    = 1 (one scalar per date response).
+    """
+    date_str = response.get("date")
+    if not date_str or date_str == "latest":
+        raise AlphaVantageResponseError(
+            "HISTORICAL_PUT_CALL_RATIO response has no explicit date; got "
+            f"{date_str!r}. Request must include date=YYYY-MM-DD."
+        )
+    if response.get("put_call_ratio_full_chain") is None:
+        raise AlphaVantageResponseError(
+            "HISTORICAL_PUT_CALL_RATIO response missing 'put_call_ratio_full_chain'"
+        )
+    naive_midnight = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+    value_time = naive_midnight.replace(tzinfo=US_EASTERN_ZONE).astimezone(UTC)
+    return ObservationMetadata(
+        value_time=value_time,
+        known_at=value_time,
+        rows_written=1,
+    )
+
+
 def alphavantage_macro_extract_metadata(response: dict[str, Any]) -> ObservationMetadata:
     """Extract ObservationMetadata from a macro-series response.
 
@@ -364,6 +393,7 @@ __all__ = [
     "alphavantage_index_extract_metadata",
     "alphavantage_macro_extract_metadata",
     "alphavantage_options_extract_metadata",
+    "alphavantage_put_call_ratio_extract_metadata",
     "make_alphavantage_fetcher",
     "make_alphavantage_raw_fetcher",
 ]

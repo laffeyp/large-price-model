@@ -22,6 +22,8 @@ import os
 import sys
 import time
 import traceback
+from datetime import date as date_type
+from datetime import timedelta
 from pathlib import Path
 
 from price_space_llm.alignment.join import _default_macro_params
@@ -29,6 +31,7 @@ from price_space_llm.ingestion.alphavantage import (
     alphavantage_extract_metadata,
     alphavantage_index_extract_metadata,
     alphavantage_macro_extract_metadata,
+    alphavantage_put_call_ratio_extract_metadata,
     make_alphavantage_raw_fetcher,
 )
 from price_space_llm.ingestion.client import IngestionCallFailed, IngestionClient, RawFetcher
@@ -37,6 +40,20 @@ from price_space_llm.script_harness import script_session
 _MACRO_TOOLS = frozenset(
     {"CPI", "FEDERAL_FUNDS_RATE", "TREASURY_YIELD", "UNEMPLOYMENT", "NONFARM_PAYROLL"}
 )
+_OPTIONS_PER_DATE_TOOLS = frozenset({"HISTORICAL_PUT_CALL_RATIO"})
+
+
+def _weekdays_in_month_range(months: list[str]) -> list[str]:
+    """Return every weekday YYYY-MM-DD across the inclusive month list."""
+    out: list[str] = []
+    for m in months:
+        y, mo = (int(x) for x in m.split("-"))
+        d = date_type(y, mo, 1)
+        while d.month == mo:
+            if d.weekday() < 5:
+                out.append(d.isoformat())
+            d = d + timedelta(days=1)
+    return out
 
 
 def _month_range(start: str, end: str) -> list[str]:
@@ -166,11 +183,23 @@ def main(argv: list[str] | None = None) -> int:
             cache_dir=args.cache_dir,
             emitter=emitter,
             clock=time.monotonic,
+            # Sprint 046: batch pulls block on the token bucket instead of raising
+            # so a 2000-call options pull sustains its configured rate without
+            # dropping calls. Rate 150/min matches the account's observed
+            # per-endpoint ceiling on 2026-08-14 probes (200 calls at 207/min
+            # accepted; drop below with margin for shared use).
+            rate_limit_per_minute=150,
+            rate_limit_behavior="block",
         )
         index_channels = [c for c in channels if c["tool"] == "INDEX_DATA"]
         intraday_channels = [c for c in channels if c["tool"] == "TIME_SERIES_INTRADAY"]
         macro_channels = [c for c in channels if c["tool"] in _MACRO_TOOLS]
-        known_tools = {"INDEX_DATA", "TIME_SERIES_INTRADAY"} | set(_MACRO_TOOLS)
+        options_channels = [c for c in channels if c["tool"] in _OPTIONS_PER_DATE_TOOLS]
+        known_tools = (
+            {"INDEX_DATA", "TIME_SERIES_INTRADAY"}
+            | set(_MACRO_TOOLS)
+            | set(_OPTIONS_PER_DATE_TOOLS)
+        )
         other_channels = [c for c in channels if c["tool"] not in known_tools]
         if other_channels:
             print(
@@ -213,6 +242,47 @@ def main(argv: list[str] | None = None) -> int:
                 traceback.print_exc(file=sys.stderr)
                 n_failed += 1
                 exit_code = 2
+
+        # Sprint 046: options endpoints take a date per call; iterate every weekday
+        # across the requested month range. Every failure emits
+        # `CHANNEL_FETCH_FAILED` and prints the reason to stderr; nothing is
+        # silenced. Holidays return `put_call_ratio_full_chain: null` -- the
+        # extractor raises AlphaVantageResponseError with reason=null_full_chain.
+        if options_channels:
+            from price_space_llm.ingestion.alphavantage import (
+                AlphaVantageError,
+            )
+
+            weekdays = _weekdays_in_month_range(months)
+            for ch in options_channels:
+                for d in weekdays:
+                    try:
+                        client.call(
+                            channel=ch["channel"],
+                            symbol=ch["symbol"],
+                            tool=ch["tool"],
+                            params={"symbol": ch["symbol"], "date": d, "datatype": "json"},
+                            extract_metadata=alphavantage_put_call_ratio_extract_metadata,
+                        )
+                        n_ok += 1
+                    except (IngestionCallFailed, AlphaVantageError) as ex:
+                        # Sprint 046: every failure gets a signal + stderr line;
+                        # no silent drops. exception_class distinguishes null-full-chain
+                        # from rate-limit from transport failure.
+                        emitter.emit(
+                            "CHANNEL_FETCH_FAILED",
+                            source="mcp_av",
+                            channel=ch["channel"],
+                            symbol=ch["symbol"],
+                            sample_date=d,
+                            exception_class=type(ex).__name__,
+                            error_message=str(ex),
+                        )
+                        print(
+                            f"ingest[options]: FAIL {ch['symbol']} {d}: {type(ex).__name__}: {ex}",
+                            file=sys.stderr,
+                        )
+                        n_failed += 1
 
         for month in months:
             for ch in intraday_channels:

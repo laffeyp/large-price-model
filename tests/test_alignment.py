@@ -16,6 +16,7 @@ from price_space_llm.alignment.join import (
     load_channel_bars,
     load_index_daily_bars,
     load_macro_bars,
+    load_put_call_ratio_bars,
     run_alignment,
 )
 from price_space_llm.ingestion import cache as _cache
@@ -725,6 +726,80 @@ def test_load_macro_bars_skips_rows_with_dot_value(tmp_path: Path):
         known_at_hour_utc=13,
     )
     assert bars.height == 2  # dot-value row skipped
+
+
+# load_put_call_ratio_bars (Sprint 046) -----------------------------------
+
+
+def _write_pcr_cache(tmp_path: Path, symbol: str, date_str: str, value: str | None) -> Path:
+    """Write a per-date HISTORICAL_PUT_CALL_RATIO cache entry."""
+    from price_space_llm.ingestion import cache as _cache_mod
+    params = {"symbol": symbol, "date": date_str, "datatype": "json"}
+    key = _cache_mod.cache_key("HISTORICAL_PUT_CALL_RATIO", "options", symbol, params)
+    path = _cache_mod.cache_path(tmp_path, "mcp_av", "HISTORICAL_PUT_CALL_RATIO", key)
+    payload = {
+        "symbol": symbol,
+        "date": date_str,
+        "put_call_ratio_full_chain": value,
+        "put_call_ratio_by_expiration": [],
+    }
+    _cache_mod.write(path, payload)
+    return path
+
+
+def test_load_put_call_ratio_bars_walks_per_date_caches(tmp_path: Path):
+    """Sprint 046: loader walks the tool directory and builds a time series
+    from many single-date cache files."""
+    _write_pcr_cache(tmp_path, "SPY", "2024-06-03", "1.11")
+    _write_pcr_cache(tmp_path, "SPY", "2024-06-04", "1.12")
+    _write_pcr_cache(tmp_path, "SPY", "2024-06-05", "1.27")
+    # Holiday-shaped null row: loader must skip.
+    _write_pcr_cache(tmp_path, "SPY", "2024-06-19", None)
+    bars = load_put_call_ratio_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        symbol="SPY",
+        channel="options",
+        known_at_lag_days=1,
+        known_at_hour_utc=13,
+    )
+    assert bars.height == 3  # null row skipped
+    assert bars["close"].to_list() == [1.11, 1.12, 1.27]
+    # known_at = value_time (2024-06-03 04:00 UTC EDT midnight) + 1d + 13h
+    # = 2024-06-04 17:00 UTC.
+    first_known = bars["known_at"][0]
+    assert first_known.year == 2024
+    assert first_known.month == 6
+    assert first_known.day == 4
+    assert first_known.hour == 17
+
+
+def test_load_put_call_ratio_bars_ignores_other_symbols(tmp_path: Path):
+    """Loader filters to `symbol`; caches for other symbols do not leak in."""
+    _write_pcr_cache(tmp_path, "SPY", "2024-06-03", "1.11")
+    _write_pcr_cache(tmp_path, "QQQ", "2024-06-03", "0.88")
+    bars = load_put_call_ratio_bars(
+        cache_dir=tmp_path,
+        source="mcp_av",
+        symbol="SPY",
+        channel="options",
+        known_at_lag_days=1,
+        known_at_hour_utc=13,
+    )
+    assert bars.height == 1
+    assert bars["close"][0] == 1.11
+
+
+def test_load_put_call_ratio_bars_raises_on_empty_directory(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="no HISTORICAL_PUT_CALL_RATIO cache"):
+        load_put_call_ratio_bars(
+            cache_dir=tmp_path,
+            source="mcp_av",
+            symbol="SPY",
+            channel="options",
+            known_at_lag_days=1,
+            known_at_hour_utc=13,
+        )
 
 
 def test_run_alignment_dispatches_macro_channel(tmp_path: Path):
