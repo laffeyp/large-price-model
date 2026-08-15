@@ -17,20 +17,38 @@ when a second architecture appears):
 
 from price_space_llm.model.dataset import (
     TokenizedArtifact,
+    WindowBatchFeats,
     WindowSampler,
+    WindowSamplerFeats,
     load_tokens,
     load_tokens_pt,
 )
-from price_space_llm.model.trainer import TrainerResult, run_training
-from price_space_llm.model.transformer import PriceSpaceLLM, TransformerConfig
+from price_space_llm.model.trainer import (
+    TrainerResult,
+    run_training,
+    run_training_feats,
+)
+from price_space_llm.model.transformer import (
+    MarketStateEmbedder,
+    MarketStateTransformer,
+    MarketStateTransformerConfig,
+    PriceSpaceLLM,
+    TransformerConfig,
+)
 
 __all__ = [
+    "MarketStateEmbedder",
+    "MarketStateTransformer",
+    "MarketStateTransformerConfig",
     "PriceSpaceLLM",
     "TokenizedArtifact",
     "TrainerResult",
     "TransformerConfig",
+    "WindowBatchFeats",
     "WindowSampler",
+    "WindowSamplerFeats",
     "load_tokens",
     "load_tokens_pt",
     "run_training",
+    "run_training_feats",
 ]

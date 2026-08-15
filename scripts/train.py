@@ -21,9 +21,12 @@ import torch
 from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.git import git_sha
 from price_space_llm.model import (
+    MarketStateTransformerConfig,
     TransformerConfig,
     load_tokens,
+    load_tokens_pt,
     run_training,
+    run_training_feats,
 )
 from price_space_llm.model.trainer import TrainerConfig, TrainingDiverged
 from price_space_llm.script_harness import script_session
@@ -49,8 +52,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tokens",
         type=Path,
-        required=True,
-        help="Path to a tokens parquet from `scripts/bucketize.py`.",
+        default=None,
+        help="Path to a tokens parquet from `scripts/bucketize.py` (bucket-ID path).",
+    )
+    # Sprint 053: multi-channel market-state training path. Consumes the
+    # Sprint 052 .pt artifact via WindowSamplerFeats + MarketStateTransformer.
+    # Mutually exclusive with --tokens.
+    parser.add_argument(
+        "--tokens-pt",
+        type=Path,
+        default=None,
+        help="Path to a Sprint 052 tokenized .pt artifact. Triggers "
+        "MarketStateTransformer training via run_training_feats.",
     )
     parser.add_argument(
         "--config",
@@ -79,19 +92,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.tokens.exists():
-        print(f"train: tokens parquet not found: {args.tokens}", file=sys.stderr)
+    # Sprint 053: exactly one of --tokens / --tokens-pt is required.
+    if bool(args.tokens) == bool(args.tokens_pt):
+        print(
+            "train: pass exactly one of --tokens (bucket-ID parquet) or "
+            "--tokens-pt (market-state .pt artifact)",
+            file=sys.stderr,
+        )
+        return 1
+    tokens_path: Path = args.tokens or args.tokens_pt
+    if not tokens_path.exists():
+        print(f"train: tokens path not found: {tokens_path}", file=sys.stderr)
         return 1
 
-    run_id = f"train-{args.tokens.stem}-s{args.n_steps}-{args.seed:016d}"
-    # Sprint 041: config_hash keyed to the resolved experiment config file; data_hash
-    # keyed to the tokens parquet. Previously both hashed tokens_bytes -- silently
-    # broke reproducibility across configs with the same input.
+    run_id = f"train-{tokens_path.stem}-s{args.n_steps}-{args.seed:016d}"
     if not args.config.exists():
         print(f"train: config not found: {args.config}", file=sys.stderr)
         return 1
     config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
-    data_hash = hashlib.sha256(args.tokens.read_bytes()).hexdigest()
+    data_hash = hashlib.sha256(tokens_path.read_bytes()).hexdigest()
 
     result = None
     with script_session(
@@ -111,18 +130,6 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         cfg = config_result.config
 
-        tokens = load_tokens(args.tokens, cfg.target_symbol)
-        if len(tokens) < cfg.context_len + 2:
-            print(
-                f"train: only {len(tokens)} tokens; need at least {cfg.context_len + 2}",
-                file=sys.stderr,
-            )
-            return 1
-
-        model_cfg = TransformerConfig(
-            vocab_size=cfg.n_buckets,
-            context_len=cfg.context_len,
-        )
         trainer_cfg = TrainerConfig(
             n_steps=args.n_steps,
             batch_size=args.batch_size,
@@ -130,20 +137,56 @@ def main(argv: list[str] | None = None) -> int:
             eval_every=args.eval_every,
             seed=args.seed,
         )
-
         device = _resolve_device(args.device)
         print(f"train: device={device}", file=sys.stderr)
 
         try:
-            result = run_training(
-                tokens=tokens,
-                trainer_cfg=trainer_cfg,
-                model_cfg=model_cfg,
-                emitter=emitter,
-                run_id=run_id,
-                checkpoint_dir=args.checkpoint_dir,
-                device=device,
-            )
+            if args.tokens_pt is not None:
+                # Sprint 053: market-state path via .pt artifact.
+                artifact = load_tokens_pt(args.tokens_pt)
+                channel_dims = {k: int(v.shape[1]) for k, v in artifact.features.items()}
+                pt_model_cfg = MarketStateTransformerConfig(
+                    vocab_size=cfg.n_buckets,
+                    context_len=cfg.context_len,
+                    channel_dims=channel_dims,
+                )
+                if artifact.targets.shape[0] < cfg.context_len + 2:
+                    print(
+                        f"train: only {artifact.targets.shape[0]} rows; "
+                        f"need at least {cfg.context_len + 2}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                result = run_training_feats(
+                    artifact=artifact,
+                    trainer_cfg=trainer_cfg,
+                    model_cfg=pt_model_cfg,
+                    emitter=emitter,
+                    run_id=run_id,
+                    checkpoint_dir=args.checkpoint_dir,
+                    device=device,
+                )
+            else:
+                tokens = load_tokens(args.tokens, cfg.target_symbol)
+                if len(tokens) < cfg.context_len + 2:
+                    print(
+                        f"train: only {len(tokens)} tokens; need at least {cfg.context_len + 2}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                bucket_model_cfg = TransformerConfig(
+                    vocab_size=cfg.n_buckets,
+                    context_len=cfg.context_len,
+                )
+                result = run_training(
+                    tokens=tokens,
+                    trainer_cfg=trainer_cfg,
+                    model_cfg=bucket_model_cfg,
+                    emitter=emitter,
+                    run_id=run_id,
+                    checkpoint_dir=args.checkpoint_dir,
+                    device=device,
+                )
         except TrainingDiverged as ex:
             print(f"train: diverged: {ex}", file=sys.stderr)
             return 2

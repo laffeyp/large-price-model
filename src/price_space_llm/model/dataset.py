@@ -120,6 +120,76 @@ class TokenizedArtifact:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+# Sprint 053: multi-channel window sampler --------------------------------
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class WindowBatchFeats:
+    """Per-channel feature batch for the MarketStateTransformer.
+
+    `feats[key]` shape: `Tensor[B, T, F_c]`. `targets` shape: `Tensor[B, T]` int64,
+    with -100 marking null targets (PyTorch CE ignore_index).
+    """
+
+    feats: dict[str, Tensor]
+    targets: Tensor
+    starts: tuple[int, ...]
+
+
+class WindowSamplerFeats:
+    """Random-window sampler over a Sprint 052 TokenizedArtifact.
+
+    Uses the same start indices across every channel so all per-channel slices
+    align in time. Targets are `artifact.targets[start+1 : start+1+context_len]`
+    matching the bucket-ID sampler's shift-by-one causality convention.
+    """
+
+    def __init__(
+        self,
+        artifact: TokenizedArtifact,
+        *,
+        context_len: int,
+        batch_size: int,
+        generator: torch.Generator,
+    ) -> None:
+        if not artifact.features:
+            raise ValueError("TokenizedArtifact has no features; cannot sample")
+        first_key = next(iter(artifact.features.keys()))
+        t = artifact.features[first_key].shape[0]
+        for key, tensor in artifact.features.items():
+            if tensor.shape[0] != t:
+                raise ValueError(f"channel {key!r} length {tensor.shape[0]} != {t} (first channel)")
+        if t < context_len + 1:
+            raise ValueError(f"need at least {context_len + 1} rows; got {t}")
+        if artifact.targets.shape[0] != t:
+            raise ValueError(f"targets length {artifact.targets.shape[0]} != features length {t}")
+        self._artifact = artifact
+        self._context_len = context_len
+        self._batch_size = batch_size
+        self._generator = generator
+        self._max_start = t - context_len - 1
+
+    def sample(self) -> WindowBatchFeats:
+        starts = torch.randint(
+            low=0,
+            high=self._max_start + 1,
+            size=(self._batch_size,),
+            generator=self._generator,
+        )
+        feats: dict[str, Tensor] = {}
+        for key, tensor in self._artifact.features.items():
+            slices = [tensor[s : s + self._context_len] for s in starts]
+            feats[key] = torch.stack(slices)  # (B, T, F_c)
+        targets = torch.stack(
+            [self._artifact.targets[s + 1 : s + 1 + self._context_len] for s in starts]
+        )  # (B, T)
+        starts_tuple = tuple(int(x) for x in starts.tolist())
+        return WindowBatchFeats(feats=feats, targets=targets, starts=starts_tuple)
+
+    def n_valid_starts(self) -> int:
+        return self._max_start + 1
+
+
 def load_tokens_pt(path: Path) -> TokenizedArtifact:
     """Read a Sprint 052 tokenized `.pt` artifact and return the typed dataclass.
 

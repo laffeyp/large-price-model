@@ -8,12 +8,20 @@ import torch
 
 from price_space_llm.model.dataset import (
     TokenizedArtifact,
+    WindowBatchFeats,
     WindowSampler,
+    WindowSamplerFeats,
     load_tokens,
     load_tokens_pt,
     split_tokens,
 )
-from price_space_llm.model.transformer import PriceSpaceLLM, TransformerConfig
+from price_space_llm.model.transformer import (
+    MarketStateEmbedder,
+    MarketStateTransformer,
+    MarketStateTransformerConfig,
+    PriceSpaceLLM,
+    TransformerConfig,
+)
 
 # Transformer -------------------------------------------------------------
 
@@ -212,3 +220,152 @@ def test_load_tokens_pt_preserves_feature_shapes(tmp_path: Path):
     artifact = load_tokens_pt(path)
     assert artifact.features["target__SPY"].shape == (8, 4)
     assert float(artifact.features["target__SPY"][3, 2]) == 3 * 4 + 2
+
+
+# MarketStateEmbedder (Sprint 053) ----------------------------------------
+
+
+def test_market_state_embedder_output_shape():
+    """MarketStateEmbedder(feats) returns Tensor[B, T, d_model]."""
+    emb = MarketStateEmbedder({"target__SPY": 10, "market_context__VIX": 4}, d_model=64)
+    feats = {
+        "target__SPY": torch.randn(2, 8, 10),
+        "market_context__VIX": torch.randn(2, 8, 4),
+    }
+    out = emb(feats)
+    assert out.shape == (2, 8, 64)
+
+
+def test_market_state_embedder_sum_equals_concat_projection():
+    """Sum invariance: Σ_c W_c x_c equals a concat-then-project on the same data."""
+    torch.manual_seed(0)
+    channel_dims = {"a": 3, "b": 5}
+    d_model = 4
+    emb = MarketStateEmbedder(channel_dims, d_model=d_model)
+    # Build a matching W_concat from the module's per-channel weights.
+    w_a = emb.projections["a"].weight  # (4, 3)
+    b_a = emb.projections["a"].bias  # (4,)
+    w_b = emb.projections["b"].weight
+    b_b = emb.projections["b"].bias
+    x_a = torch.randn(1, 2, 3)
+    x_b = torch.randn(1, 2, 5)
+    sum_form = emb({"a": x_a, "b": x_b})
+    # Manual: W_a x_a + W_b x_b + (b_a + b_b)
+    manual = x_a @ w_a.T + x_b @ w_b.T + b_a + b_b
+    assert torch.allclose(sum_form, manual, atol=1e-6)
+
+
+def test_market_state_embedder_rejects_unknown_channel():
+    emb = MarketStateEmbedder({"a": 3}, d_model=4)
+    with pytest.raises(ValueError, match="unexpected channels"):
+        emb({"a": torch.randn(1, 2, 3), "b": torch.randn(1, 2, 5)})
+
+
+def test_market_state_transformer_forward_shape():
+    """MarketStateTransformer(feats) returns Tensor[B, T, vocab_size]."""
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=64,
+        channel_dims={"target__SPY": 10, "market_context__VIX": 4},
+        d_model=64,
+    )
+    model = MarketStateTransformer(cfg)
+    feats = {
+        "target__SPY": torch.randn(2, 16, 10),
+        "market_context__VIX": torch.randn(2, 16, 4),
+    }
+    logits = model(feats)
+    assert logits.shape == (2, 16, 32)
+
+
+# WindowSamplerFeats (Sprint 053) -----------------------------------------
+
+
+def _sample_artifact(n_rows: int = 200) -> TokenizedArtifact:
+    return TokenizedArtifact(
+        features={
+            "target__SPY": torch.arange(n_rows * 4, dtype=torch.float32).reshape(n_rows, 4),
+            "market_context__VIX": torch.randn(n_rows, 3),
+        },
+        targets=torch.randint(0, 32, (n_rows,), dtype=torch.int64),
+        vol=torch.zeros(n_rows, dtype=torch.float32),
+        timestamps=torch.arange(n_rows, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.ones(n_rows, dtype=torch.bool),
+        channel_names=("market_context__VIX", "target__SPY"),
+        meta={"run_id": "test"},
+    )
+
+
+def test_window_sampler_feats_batch_shapes():
+    """Each per-channel tensor has shape [B, T, F_c]; targets is [B, T]."""
+    artifact = _sample_artifact(n_rows=200)
+    gen = torch.Generator()
+    gen.manual_seed(0)
+    sampler = WindowSamplerFeats(artifact, context_len=16, batch_size=4, generator=gen)
+    batch = sampler.sample()
+    assert isinstance(batch, WindowBatchFeats)
+    assert batch.feats["target__SPY"].shape == (4, 16, 4)
+    assert batch.feats["market_context__VIX"].shape == (4, 16, 3)
+    assert batch.targets.shape == (4, 16)
+
+
+def test_window_sampler_feats_target_is_shifted_by_one():
+    """Sprint 053: targets are artifact.targets[start+1 : start+1+context_len].
+    Reconstruct one window from a fixed start and check the shift."""
+    artifact = _sample_artifact(n_rows=200)
+    gen = torch.Generator()
+    gen.manual_seed(0)
+    sampler = WindowSamplerFeats(artifact, context_len=8, batch_size=1, generator=gen)
+    batch = sampler.sample()
+    start = batch.starts[0]
+    expected_targets = artifact.targets[start + 1 : start + 1 + 8]
+    assert torch.equal(batch.targets[0], expected_targets)
+
+
+def test_window_sampler_feats_rejects_mismatched_lengths():
+    """A channel with a different row count than the first channel raises."""
+    features: dict[str, torch.Tensor] = {
+        "a": torch.zeros((100, 4), dtype=torch.float32),
+        "b": torch.zeros((99, 4), dtype=torch.float32),
+    }
+    artifact = TokenizedArtifact(
+        features=features,
+        targets=torch.zeros(100, dtype=torch.int64),
+        vol=torch.zeros(100, dtype=torch.float32),
+        timestamps=torch.zeros(100, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.zeros(100, dtype=torch.bool),
+        channel_names=("a", "b"),
+        meta={},
+    )
+    with pytest.raises(ValueError, match=r"length 99 != 100"):
+        WindowSamplerFeats(artifact, context_len=8, batch_size=1, generator=torch.Generator())
+
+
+def test_run_training_feats_completes_two_step_smoke(tmp_path: Path):
+    """Sprint 053: run_training_feats runs two steps against a synthetic
+    artifact and returns a valid TrainerResult."""
+    from price_space_llm.model import run_training_feats
+    from price_space_llm.model.trainer import TrainerConfig
+    from price_space_llm.signals import StrictSignalEmitter, load_vocabulary
+
+    artifact = _sample_artifact(n_rows=500)
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=64,
+        channel_dims={"target__SPY": 4, "market_context__VIX": 3},
+        d_model=64,
+    )
+    trainer_cfg = TrainerConfig(n_steps=2, batch_size=2, lr=1e-3, eval_every=2, seed=0)
+    emitter = StrictSignalEmitter(load_vocabulary(), max_buffer=16384)
+    result = run_training_feats(
+        artifact=artifact,
+        trainer_cfg=trainer_cfg,
+        model_cfg=cfg,
+        emitter=emitter,
+        run_id="test-feats-smoke",
+        checkpoint_dir=tmp_path / "ckpts",
+    )
+    assert result.final_step == 2
+    assert result.n_parameters > 0
