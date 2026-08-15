@@ -72,12 +72,16 @@ def _compute_val_metrics(
     all_probs: list[torch.Tensor] = []
     all_targets: list[torch.Tensor] = []
     vocab_size = model.config.vocab_size
+    # Sprint 051 blocker #4: val batches move to model's device before forward.
+    val_device = next(model.parameters()).device
     with torch.no_grad():
         for _ in range(n_val_batches):
             batch = val_sampler.sample()
-            logits = model(batch.inputs)  # (B, T, V)
+            inputs = batch.inputs.to(val_device)
+            targets_dev = batch.targets.to(val_device)
+            logits = model(inputs)  # (B, T, V)
             probs = F.softmax(logits, dim=-1).reshape(-1, vocab_size)
-            targets = batch.targets.reshape(-1)
+            targets = targets_dev.reshape(-1)
             all_probs.append(probs)
             all_targets.append(targets)
     model.train()
@@ -117,6 +121,7 @@ def run_training(
     emitter: StrictSignalEmitter,
     run_id: str,
     checkpoint_dir: Path,
+    device: str = "cpu",
 ) -> TrainerResult:
     """Fit model on `tokens`; emit every declared training tag; write checkpoints.
 
@@ -145,7 +150,11 @@ def run_training(
         generator=val_generator,
     )
 
-    model = PriceSpaceLLM(model_cfg)
+    # Sprint 051 blocker #4: model + batch tensors live on `device`. Sampler
+    # generator stays on CPU (integer index sampling); every batch's inputs and
+    # targets move to device inside the loop before the forward pass.
+    torch_device = torch.device(device)
+    model = PriceSpaceLLM(model_cfg).to(torch_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=trainer_cfg.lr)
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -167,10 +176,12 @@ def run_training(
             start_position=int(batch.starts[0]),
             context_len=str(model_cfg.context_len),
         )
-        logits = model(batch.inputs)
+        inputs = batch.inputs.to(torch_device)
+        targets = batch.targets.to(torch_device)
+        logits = model(inputs)
         loss = F.cross_entropy(
             logits.reshape(-1, model_cfg.vocab_size),
-            batch.targets.reshape(-1),
+            targets.reshape(-1),
         )
         train_loss = float(loss.item())
 

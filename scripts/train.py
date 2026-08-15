@@ -16,6 +16,8 @@ import sys
 import traceback
 from pathlib import Path
 
+import torch
+
 from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.git import git_sha
 from price_space_llm.model import (
@@ -25,6 +27,21 @@ from price_space_llm.model import (
 )
 from price_space_llm.model.trainer import TrainerConfig, TrainingDiverged
 from price_space_llm.script_harness import script_session
+
+
+def _resolve_device(spec: str) -> str:
+    """Sprint 051: resolve `--device auto` to the concrete best-available device.
+
+    Order: cuda > mps > cpu. Explicit `--device cuda|mps|cpu` passes through
+    unchanged; the caller is trusted to know their box.
+    """
+    if spec != "auto":
+        return spec
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,6 +68,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--eval-every", type=int, default=25)
+    # Sprint 051: pre-GPU review blocker #4 (device handling).
+    # `auto` resolves to cuda > mps > cpu. Explicit `cuda` fails loud if CUDA
+    # isn't available (torch raises inside .to("cuda")); that's the correct
+    # behavior for a GPU-explicit run against a CPU box.
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda", "mps", "auto"),
+        default="auto",
+    )
     args = parser.parse_args(argv)
 
     if not args.tokens.exists():
@@ -105,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
         )
 
+        device = _resolve_device(args.device)
+        print(f"train: device={device}", file=sys.stderr)
+
         try:
             result = run_training(
                 tokens=tokens,
@@ -113,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 emitter=emitter,
                 run_id=run_id,
                 checkpoint_dir=args.checkpoint_dir,
+                device=device,
             )
         except TrainingDiverged as ex:
             print(f"train: diverged: {ex}", file=sys.stderr)
