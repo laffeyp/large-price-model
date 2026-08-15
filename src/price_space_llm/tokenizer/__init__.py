@@ -17,6 +17,7 @@ from price_space_llm.tokenizer.bucketize import (
     fit_bucketizer,
     load_bucket_stats,
     run_tokenizer,
+    run_tokenizer_pt,
     write_bucket_stats,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "fit_bucketizer",
     "load_bucket_stats",
     "run_tokenizer",
+    "run_tokenizer_pt",
     "write_bucket_stats",
 ]

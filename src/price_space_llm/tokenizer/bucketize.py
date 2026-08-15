@@ -9,6 +9,7 @@ Assignment: for each grid row, `bucket_id = np.searchsorted(edges, x)`.
 Values outside all edges are clamped to `0` or `n_buckets - 1`.
 """
 
+import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -16,7 +17,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import polars as pl
+import torch
 
 from price_space_llm.signals import StrictSignalEmitter
 
@@ -287,3 +290,141 @@ def _ensure_iso(ts: Any) -> str:
     if isinstance(ts, datetime):
         return ts.isoformat()
     return str(ts)
+
+
+# Sprint 052: extended tokenized artifact per tech-arch §5 --------------------
+
+
+def _per_channel_feature_columns(features: pl.DataFrame) -> dict[str, list[str]]:
+    """Return {channel__symbol: sorted list of feature columns} for every channel.
+
+    Excludes the `known_at` column; every other `{key}__*` column is a feature.
+    """
+    keys = _channel_columns(features)
+    out: dict[str, list[str]] = {}
+    for key in keys:
+        prefix = f"{key}__"
+        cols = sorted(
+            c for c in features.columns if c.startswith(prefix) and c != f"{key}__known_at"
+        )
+        out[key] = cols
+    return out
+
+
+def run_tokenizer_pt(
+    features_path: Path,
+    output_dir: Path,
+    stats: BucketStats,
+    *,
+    target_symbol: str,
+    emitter: StrictSignalEmitter,
+    run_id: str,
+    channel_coverage_path: Path | None = None,
+    config_hash: str = "unknown",
+    data_hash: str = "unknown",
+    git_sha_value: str = "unknown",
+) -> Path:
+    """Write the extended tokenized artifact to `data/tokenized/{run_id}.pt`.
+
+    Per tech-arch §5: `torch.save`d dict with per-channel `Tensor[T, F_c]`,
+    `targets`, `vol`, `timestamps`, `is_overnight_gap`, `mask`, `channel_names`,
+    `meta`.
+
+    Sprint 052 conventions:
+    - Feature nulls become 0.0 in the tensor; row-level `mask` flips False.
+    - `targets[t] = -100` (PyTorch CE ignore_index) where the target's
+      log_return is null; otherwise the assigned bucket_id from `stats.edges`.
+    - `vol[t]` reads `target__{sym}__realized_vol_30`; falls back to zeros if
+      Sprint 049 hasn't run against this features parquet yet.
+    - `timestamps[t]` is UTC Unix seconds from `grid_ts`.
+    - `is_overnight_gap` is `None` until Sprint 055 (session flags) lands.
+    - `mask[t]` is True iff every feature column across every channel is
+      non-null at row `t`.
+    """
+    del emitter  # Sprint 052 defers a dedicated emit; sha256 sidecar carries
+    # the auditability. Sprint 053 or a v0.5 vocab bump may add
+    # TOKENIZED_ARTIFACT_WRITTEN if needed.
+
+    features = pl.read_parquet(features_path)
+    n_rows = features.height
+    per_channel = _per_channel_feature_columns(features)
+
+    features_dict: dict[str, torch.Tensor] = {}
+    for key, cols in per_channel.items():
+        if not cols:
+            continue
+        # Stack columns into [n_rows, F_c] with nulls -> 0.0. Polars returns
+        # non-writable numpy arrays for zero-copy views; PyTorch refuses those,
+        # so copy into a fresh writable array before wrapping.
+        arr: np.ndarray = np.zeros((n_rows, len(cols)), dtype=np.float32)
+        for j, col in enumerate(cols):
+            vals = features[col].fill_null(0.0).to_numpy()
+            arr[:, j] = vals.astype(np.float32, copy=True)
+        features_dict[key] = torch.from_numpy(arr)
+
+    # Targets: bucket_id sequence for the target symbol.
+    target_col = _log_return_col(target_symbol)
+    if target_col not in features.columns:
+        raise ValueError(f"features parquet has no target column {target_col!r}")
+    log_ret = features[target_col].to_list()
+    bucket_ids = assign_buckets(log_ret, stats.edges)
+    targets_np: np.ndarray = np.full(n_rows, -100, dtype=np.int64)
+    for i, bid in enumerate(bucket_ids):
+        if bid is not None:
+            targets_np[i] = bid
+    targets_t = torch.from_numpy(targets_np)
+
+    # Vol: target's realized_vol_30; zeros if the column is absent.
+    vol_col = f"target__{target_symbol}__realized_vol_30"
+    vol_arr: np.ndarray
+    if vol_col in features.columns:
+        vol_arr = features[vol_col].fill_null(0.0).to_numpy().astype(np.float32, copy=True)
+    else:
+        vol_arr = np.zeros(n_rows, dtype=np.float32)
+    vol_t = torch.from_numpy(vol_arr)
+
+    # Timestamps: UTC Unix seconds.
+    ts_arr: np.ndarray = features["grid_ts"].dt.epoch("s").to_numpy().astype(np.int64, copy=True)
+    timestamps_t = torch.from_numpy(ts_arr)
+
+    # Mask: True iff every feature column is non-null at that row.
+    all_feature_cols = [c for cols in per_channel.values() for c in cols]
+    mask_arr: np.ndarray
+    if all_feature_cols:
+        mask_series = features.select(
+            pl.all_horizontal([pl.col(c).is_not_null() for c in all_feature_cols]).alias("__mask")
+        )["__mask"]
+        mask_arr = mask_series.to_numpy().astype(bool, copy=True)
+    else:
+        mask_arr = np.zeros(n_rows, dtype=bool)
+    mask_t = torch.from_numpy(mask_arr)
+
+    # Meta.
+    channel_coverage_sha = "unknown"
+    if channel_coverage_path is not None and channel_coverage_path.exists():
+        channel_coverage_sha = hashlib.sha256(channel_coverage_path.read_bytes()).hexdigest()
+    meta = {
+        "run_id": run_id,
+        "config_hash": config_hash,
+        "git_sha": git_sha_value,
+        "data_hash": data_hash,
+        "target_symbol": target_symbol,
+        "channel_coverage_sha": channel_coverage_sha,
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{run_id}.pt"
+    torch.save(
+        {
+            "features": features_dict,
+            "targets": targets_t,
+            "vol": vol_t,
+            "timestamps": timestamps_t,
+            "is_overnight_gap": None,  # Sprint 055 placeholder
+            "mask": mask_t,
+            "channel_names": tuple(sorted(features_dict.keys())),
+            "meta": meta,
+        },
+        output_path,
+    )
+    return output_path

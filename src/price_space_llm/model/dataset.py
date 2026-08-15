@@ -12,8 +12,9 @@ underlying time-series). Random sampling occurs within a partition, not
 across.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import torch
@@ -95,3 +96,49 @@ def split_tokens(tokens: list[int], train_frac: float) -> tuple[list[int], list[
         raise ValueError(f"train_frac must be in (0, 1); got {train_frac}")
     n_train = int(len(tokens) * train_frac)
     return tokens[:n_train], tokens[n_train:]
+
+
+# Sprint 052: extended tokenized artifact reader ---------------------------
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class TokenizedArtifact:
+    """Per-channel feature tensors + targets + metadata per tech-arch §5.
+
+    Sprint 052 ships this alongside the legacy parquet path; Sprint 053's
+    MarketStateEmbedder consumes it via a per-channel `nn.Linear(F_c, d_model)`
+    projection summed to a per-bar market-state vector.
+    """
+
+    features: dict[str, Tensor]  # {channel__symbol: Tensor[T, F_c]}
+    targets: Tensor  # Tensor[T] int64; -100 = null (PyTorch CE ignore_index)
+    vol: Tensor  # Tensor[T] float32; target's realized_vol_30
+    timestamps: Tensor  # Tensor[T] int64; UTC Unix seconds
+    is_overnight_gap: Tensor | None  # Tensor[T] int8 (Sprint 055) or None
+    mask: Tensor  # Tensor[T] bool; True iff every feature is non-null
+    channel_names: tuple[str, ...]
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+def load_tokens_pt(path: Path) -> TokenizedArtifact:
+    """Read a Sprint 052 tokenized `.pt` artifact and return the typed dataclass.
+
+    Raises `ValueError` if any required key is missing (features, targets,
+    vol, timestamps, mask, channel_names, meta). `is_overnight_gap` is
+    optional and defaults to None.
+    """
+    payload = torch.load(path, weights_only=False)
+    required = ("features", "targets", "vol", "timestamps", "mask", "channel_names", "meta")
+    for k in required:
+        if k not in payload:
+            raise ValueError(f"tokens .pt at {path} missing required field {k!r}")
+    return TokenizedArtifact(
+        features=payload["features"],
+        targets=payload["targets"],
+        vol=payload["vol"],
+        timestamps=payload["timestamps"],
+        is_overnight_gap=payload.get("is_overnight_gap"),
+        mask=payload["mask"],
+        channel_names=tuple(payload["channel_names"]),
+        meta=dict(payload["meta"]),
+    )

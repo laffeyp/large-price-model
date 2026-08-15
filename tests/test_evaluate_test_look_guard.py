@@ -28,7 +28,8 @@ def _run(tmp_path: Path, extra: list[str]) -> subprocess.CompletedProcess:
         str(tmp_path / "features.parquet"),
         "--logs-dir",
         str(tmp_path / "logs"),
-    ] + extra
+        *extra,
+    ]
     return subprocess.run(args, cwd=tmp_path, capture_output=True, text=True, check=False)
 
 

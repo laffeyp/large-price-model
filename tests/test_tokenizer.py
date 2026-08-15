@@ -14,6 +14,7 @@ from price_space_llm.tokenizer.bucketize import (
     fit_bucketizer,
     load_bucket_stats,
     run_tokenizer,
+    run_tokenizer_pt,
     write_bucket_stats,
 )
 
@@ -199,6 +200,176 @@ def test_run_tokenizer_writes_bucket_stats_and_tokens_parquet(tmp_path: Path):
     assert "BUCKET_STATS_WRITTEN" in tags
     assert "BUCKET_ASSIGNED" in tags
     assert "MARKET_STATE_TOKEN_EMITTED" in tags
+
+
+# run_tokenizer_pt (Sprint 052) --------------------------------------------
+
+
+def _multichannel_features(n_rows: int, log_returns: list[float] | None = None) -> pl.DataFrame:
+    """Two-channel synthetic features frame with real per-channel columns."""
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n_rows)]
+    if log_returns is None:
+        log_returns = [-0.02 + 0.04 * (i / max(1, n_rows - 1)) for i in range(n_rows)]
+    known_at = [base + timedelta(minutes=15 * i, seconds=1) for i in range(n_rows)]
+    return pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__log_return": log_returns,
+            "target__SPY__rolling_mean_20": [0.0] * n_rows,
+            "target__SPY__rolling_std_20": [0.01] * n_rows,
+            "target__SPY__rolling_z_score_20": log_returns,
+            "target__SPY__realized_vol_30": [0.005] * n_rows,
+            "market_context__QQQ__known_at": known_at,
+            "market_context__QQQ__log_return": [0.001 * i for i in range(n_rows)],
+            "market_context__QQQ__rolling_mean_20": [0.0] * n_rows,
+            "market_context__QQQ__rolling_std_20": [0.02] * n_rows,
+            "market_context__QQQ__rolling_z_score_20": [0.0] * n_rows,
+        }
+    )
+
+
+def _write_features(tmp_path: Path, df: pl.DataFrame) -> Path:
+    p = tmp_path / "features.parquet"
+    df.write_parquet(p)
+    return p
+
+
+def test_run_tokenizer_pt_writes_valid_artifact(tmp_path: Path):
+    """Sprint 052: produces a .pt loadable via torch.load with every required key."""
+    import torch
+
+    features = _multichannel_features(n_rows=200)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="test-run-pt",
+    )
+    assert output.exists()
+    payload = torch.load(output, weights_only=False)
+    for k in ("features", "targets", "vol", "timestamps", "mask", "channel_names", "meta"):
+        assert k in payload
+    assert "target__SPY" in payload["features"]
+    assert "market_context__QQQ" in payload["features"]
+
+
+def test_run_tokenizer_pt_per_channel_shapes_match(tmp_path: Path):
+    """Sprint 052: per-channel tensor shape is [n_rows, F_c]."""
+    features = _multichannel_features(n_rows=100)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="test-shapes",
+    )
+    import torch
+
+    payload = torch.load(output, weights_only=False)
+    # target__SPY has 5 feature columns (log_return + 3 rolling + realized_vol_30).
+    assert payload["features"]["target__SPY"].shape == (100, 5)
+    # market_context__QQQ has 4 feature columns (log_return + 3 rolling).
+    assert payload["features"]["market_context__QQQ"].shape == (100, 4)
+    assert payload["targets"].shape == (100,)
+    assert payload["vol"].shape == (100,)
+    assert payload["timestamps"].shape == (100,)
+    assert payload["mask"].shape == (100,)
+
+
+def test_run_tokenizer_pt_targets_use_ignore_index_for_nulls(tmp_path: Path):
+    """Sprint 052: targets[t] = -100 (PyTorch CE ignore_index) where log_return is null."""
+    n_rows = 200
+    log_returns: list[float | None] = [
+        -0.02 + 0.04 * (i / max(1, n_rows - 1)) for i in range(n_rows)
+    ]
+    log_returns[5] = None
+    log_returns[42] = None
+    features = _multichannel_features(n_rows=n_rows, log_returns=log_returns)  # type: ignore[arg-type]
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="test-ignore-index",
+    )
+    import torch
+
+    payload = torch.load(output, weights_only=False)
+    targets = payload["targets"]
+    assert int(targets[5]) == -100
+    assert int(targets[42]) == -100
+    assert 0 <= int(targets[0]) < 32
+
+
+def test_run_tokenizer_pt_meta_carries_run_id_and_target(tmp_path: Path):
+    """Sprint 052: meta dict carries run_id, target_symbol, and other hashes."""
+    features = _multichannel_features(n_rows=100)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="test-meta",
+        config_hash="deadbeef",
+        data_hash="cafebabe",
+        git_sha_value="abc123",
+    )
+    import torch
+
+    payload = torch.load(output, weights_only=False)
+    meta = payload["meta"]
+    assert meta["run_id"] == "test-meta"
+    assert meta["target_symbol"] == "SPY"
+    assert meta["config_hash"] == "deadbeef"
+    assert meta["data_hash"] == "cafebabe"
+    assert meta["git_sha"] == "abc123"
 
 
 # Property-based ------------------------------------------------------------

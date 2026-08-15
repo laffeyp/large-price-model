@@ -15,15 +15,22 @@ when a second architecture appears):
 - vocab_size = n_buckets from config (default 32)
 """
 
-from price_space_llm.model.dataset import WindowSampler, load_tokens
+from price_space_llm.model.dataset import (
+    TokenizedArtifact,
+    WindowSampler,
+    load_tokens,
+    load_tokens_pt,
+)
 from price_space_llm.model.trainer import TrainerResult, run_training
 from price_space_llm.model.transformer import PriceSpaceLLM, TransformerConfig
 
 __all__ = [
     "PriceSpaceLLM",
+    "TokenizedArtifact",
     "TrainerResult",
     "TransformerConfig",
     "WindowSampler",
     "load_tokens",
+    "load_tokens_pt",
     "run_training",
 ]

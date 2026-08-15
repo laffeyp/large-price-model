@@ -25,6 +25,7 @@ from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.git import git_sha
 from price_space_llm.script_harness import script_session
 from price_space_llm.tokenizer import run_tokenizer
+from price_space_llm.tokenizer.bucketize import load_bucket_stats, run_tokenizer_pt
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,6 +68,22 @@ def main(argv: list[str] | None = None) -> int:
         default=64,
         help="Embedding width for MARKET_STATE_TOKEN_EMITTED payload.",
     )
+    # Sprint 052: extended tokenized artifact per tech-arch §5. Default `both`
+    # keeps every pre-Sprint-052 parquet consumer working while making the new
+    # .pt available to Sprint 053's MarketStateEmbedder.
+    parser.add_argument(
+        "--format",
+        choices=("parquet", "pt", "both"),
+        default="both",
+        help="'parquet' is the pre-Sprint-052 shape; 'pt' is the extended "
+        "artifact with per-channel feature tensors; 'both' writes both.",
+    )
+    parser.add_argument(
+        "--channel-coverage",
+        type=Path,
+        default=Path("data/manifests/channel_coverage.json"),
+        help="Recorded in the .pt artifact's meta.channel_coverage_sha field.",
+    )
     args = parser.parse_args(argv)
 
     if not args.features.exists():
@@ -96,19 +113,60 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         cfg = config_result.config
 
+        pt_output_path: Path | None = None
         try:
-            result = run_tokenizer(
-                features_path=args.features,
-                output_dir=args.output_dir,
-                bucket_stats_path=args.bucket_stats,
-                target_symbol=cfg.target_symbol,
-                n_buckets=cfg.n_buckets,
-                d_model=args.d_model,
-                training_range_start=args.training_start,
-                training_range_end=args.training_end,
-                emitter=emitter,
-                run_id=run_id,
-            )
+            if args.format in ("parquet", "both"):
+                result = run_tokenizer(
+                    features_path=args.features,
+                    output_dir=args.output_dir,
+                    bucket_stats_path=args.bucket_stats,
+                    target_symbol=cfg.target_symbol,
+                    n_buckets=cfg.n_buckets,
+                    d_model=args.d_model,
+                    training_range_start=args.training_start,
+                    training_range_end=args.training_end,
+                    emitter=emitter,
+                    run_id=run_id,
+                )
+            if args.format in ("pt", "both"):
+                # If --format pt without --format both, we still need to fit +
+                # write bucket_stats before writing the .pt artifact. The
+                # `parquet` branch above does that as a side effect; when we
+                # skip it, we reuse the latest versioned bucket_stats file.
+                if args.format == "pt":
+                    import polars as pl
+
+                    from price_space_llm.tokenizer import fit_bucketizer, write_bucket_stats
+
+                    feats_df = pl.read_parquet(args.features)
+                    stats = fit_bucketizer(
+                        feats_df,
+                        target_symbol=cfg.target_symbol,
+                        n_buckets=cfg.n_buckets,
+                        training_range_start=args.training_start,
+                        training_range_end=args.training_end,
+                        emitter=emitter,
+                    )
+                    write_bucket_stats(stats, args.bucket_stats, emitter, run_id=run_id)
+                else:
+                    latest_stats = args.bucket_stats.parent / (
+                        args.bucket_stats.stem + ".latest.json"
+                    )
+                    stats = load_bucket_stats(
+                        latest_stats if latest_stats.exists() else args.bucket_stats
+                    )
+                pt_output_path = run_tokenizer_pt(
+                    features_path=args.features,
+                    output_dir=args.output_dir,
+                    stats=stats,
+                    target_symbol=cfg.target_symbol,
+                    emitter=emitter,
+                    run_id=run_id,
+                    channel_coverage_path=args.channel_coverage,
+                    config_hash=config_hash,
+                    data_hash=data_hash,
+                    git_sha_value=git_sha() or "unknown",
+                )
         except (FileNotFoundError, ValueError):
             traceback.print_exc(file=sys.stderr)
             return 1
@@ -121,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
             f"tokens={result.tokens_output_path}; trace={sink_path}",
             file=sys.stderr,
         )
+    if pt_output_path is not None:
+        print(f"tokenize: pt artifact={pt_output_path}", file=sys.stderr)
     return 0
 
 

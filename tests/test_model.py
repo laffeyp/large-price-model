@@ -7,8 +7,10 @@ import pytest
 import torch
 
 from price_space_llm.model.dataset import (
+    TokenizedArtifact,
     WindowSampler,
     load_tokens,
+    load_tokens_pt,
     split_tokens,
 )
 from price_space_llm.model.transformer import PriceSpaceLLM, TransformerConfig
@@ -153,3 +155,60 @@ def test_load_tokens_raises_on_missing_column(tmp_path: Path):
     df.write_parquet(path)
     with pytest.raises(ValueError, match="no column"):
         load_tokens(path, "SPY")
+
+
+# load_tokens_pt (Sprint 052) --------------------------------------------
+
+
+def _write_pt(tmp_path: Path, payload: dict) -> Path:
+    p = tmp_path / "tokens.pt"
+    torch.save(payload, p)
+    return p
+
+
+def _sample_payload(n_rows: int = 8) -> dict:
+    return {
+        "features": {
+            "target__SPY": torch.zeros((n_rows, 4), dtype=torch.float32),
+            "market_context__QQQ": torch.zeros((n_rows, 3), dtype=torch.float32),
+        },
+        "targets": torch.tensor([0, 1, 2, 3, -100, 5, 6, 7], dtype=torch.int64),
+        "vol": torch.zeros(n_rows, dtype=torch.float32),
+        "timestamps": torch.arange(n_rows, dtype=torch.int64),
+        "is_overnight_gap": None,
+        "mask": torch.ones(n_rows, dtype=torch.bool),
+        "channel_names": ("market_context__QQQ", "target__SPY"),
+        "meta": {"run_id": "test", "target_symbol": "SPY"},
+    }
+
+
+def test_load_tokens_pt_roundtrip(tmp_path: Path):
+    """Sprint 052: written .pt round-trips through load_tokens_pt to TokenizedArtifact."""
+    path = _write_pt(tmp_path, _sample_payload(n_rows=8))
+    artifact = load_tokens_pt(path)
+    assert isinstance(artifact, TokenizedArtifact)
+    assert set(artifact.features.keys()) == {"target__SPY", "market_context__QQQ"}
+    assert artifact.targets.shape == (8,)
+    assert artifact.mask.dtype == torch.bool
+    assert artifact.is_overnight_gap is None
+    assert artifact.channel_names == ("market_context__QQQ", "target__SPY")
+    assert artifact.meta["run_id"] == "test"
+
+
+def test_load_tokens_pt_raises_on_missing_field(tmp_path: Path):
+    """Sprint 052: reader validates every required field."""
+    payload = _sample_payload(n_rows=4)
+    del payload["mask"]
+    path = _write_pt(tmp_path, payload)
+    with pytest.raises(ValueError, match="missing required field 'mask'"):
+        load_tokens_pt(path)
+
+
+def test_load_tokens_pt_preserves_feature_shapes(tmp_path: Path):
+    """Per-channel tensor shapes survive the write/read round-trip."""
+    payload = _sample_payload(n_rows=8)
+    payload["features"]["target__SPY"] = torch.arange(8 * 4, dtype=torch.float32).reshape(8, 4)
+    path = _write_pt(tmp_path, payload)
+    artifact = load_tokens_pt(path)
+    assert artifact.features["target__SPY"].shape == (8, 4)
+    assert float(artifact.features["target__SPY"][3, 2]) == 3 * 4 + 2
