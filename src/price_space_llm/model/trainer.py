@@ -59,6 +59,9 @@ class TrainerConfig:
     betas: tuple[float, float] = (0.9, 0.95)
     bf16: bool = False
     deterministic: bool = True
+    # Sprint 058: purged embargo at split boundaries + top-K checkpoint selection.
+    embargo: int = 0
+    keep_top_k: int = 0  # 0 = keep every checkpoint (pre-Sprint-058 behavior).
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -151,7 +154,9 @@ def run_training(
     val metrics land in CHECKPOINT_WRITTEN emissions. That trace IS the log;
     downstream plotting reads `logs/{run_id}/signals.jsonl`.
     """
-    train_tokens, val_tokens = split_tokens(tokens, trainer_cfg.train_frac)
+    train_tokens, val_tokens = split_tokens(
+        tokens, trainer_cfg.train_frac, embargo=trainer_cfg.embargo
+    )
     generator = torch.Generator()
     generator.manual_seed(trainer_cfg.seed)
     torch.manual_seed(trainer_cfg.seed)
@@ -260,6 +265,7 @@ def run_training(
                 {
                     "model_state_dict": model.state_dict(),
                     "step": step,
+                    "val_nll": metrics["val_nll"],  # Sprint 058: enable disk-level top-K ranking.
                     "config": {
                         "vocab_size": model_cfg.vocab_size,
                         "context_len": model_cfg.context_len,
@@ -270,12 +276,7 @@ def run_training(
                 },
                 ckpt_path,
             )
-            # Point `{run_id}-latest.pt` at the newest step's checkpoint so downstream
-            # sim/eval CLIs can request "latest" per Sprint 036 artifact-versioning discipline.
-            latest_symlink = checkpoint_dir / f"{run_id}-latest.pt"
-            if latest_symlink.exists() or latest_symlink.is_symlink():
-                latest_symlink.unlink()
-            os.symlink(ckpt_path.name, latest_symlink)
+            _update_latest_symlink(checkpoint_dir, run_id, ckpt_path)
             emitter.emit(
                 "CHECKPOINT_WRITTEN",
                 run_id=run_id,
@@ -290,6 +291,9 @@ def run_training(
                 val_top3=metrics["val_top3"],
             )
             n_checkpoints += 1
+            # Sprint 058: prune to top-K by val_nll if configured.
+            if trainer_cfg.keep_top_k > 0:
+                _prune_checkpoints_to_top_k(checkpoint_dir, run_id, trainer_cfg.keep_top_k)
 
     # Sprint 041: real effective-epoch count = ceil(tokens_consumed / tokens_per_epoch).
     # Random-window sampling has no natural epoch boundary; the effective count is how
@@ -320,13 +324,20 @@ def run_training(
 
 
 def _split_artifact(
-    artifact: TokenizedArtifact, train_frac: float
+    artifact: TokenizedArtifact, train_frac: float, embargo: int = 0
 ) -> tuple[TokenizedArtifact, TokenizedArtifact]:
-    """Contiguous split of a TokenizedArtifact on the time axis."""
+    """Contiguous split of a TokenizedArtifact with optional purged embargo.
+
+    Sprint 058: `embargo` drops rows between train and val so the val's first
+    target does not see the training's last input.
+    """
     if not 0.0 < train_frac < 1.0:
         raise ValueError(f"train_frac must be in (0, 1); got {train_frac}")
+    if embargo < 0:
+        raise ValueError(f"embargo must be >= 0; got {embargo}")
     t = artifact.targets.shape[0]
     n_train = int(t * train_frac)
+    val_start = n_train + embargo
     train = TokenizedArtifact(
         features={k: v[:n_train] for k, v in artifact.features.items()},
         targets=artifact.targets[:n_train],
@@ -340,14 +351,14 @@ def _split_artifact(
         meta=artifact.meta,
     )
     val = TokenizedArtifact(
-        features={k: v[n_train:] for k, v in artifact.features.items()},
-        targets=artifact.targets[n_train:],
-        vol=artifact.vol[n_train:],
-        timestamps=artifact.timestamps[n_train:],
+        features={k: v[val_start:] for k, v in artifact.features.items()},
+        targets=artifact.targets[val_start:],
+        vol=artifact.vol[val_start:],
+        timestamps=artifact.timestamps[val_start:],
         is_overnight_gap=(
-            artifact.is_overnight_gap[n_train:] if artifact.is_overnight_gap is not None else None
+            artifact.is_overnight_gap[val_start:] if artifact.is_overnight_gap is not None else None
         ),
-        mask=artifact.mask[n_train:],
+        mask=artifact.mask[val_start:],
         channel_names=artifact.channel_names,
         meta=artifact.meta,
     )
@@ -413,7 +424,9 @@ def run_training_feats(
     per step, CHECKPOINT_WRITTEN at every eval, EPOCH_COMPLETED at close, TRAINING_DIVERGED
     on NaN/grad-explosion. Reuses `TrainerConfig`/`TrainerResult`/`TrainingDiverged`.
     """
-    train_artifact, val_artifact = _split_artifact(artifact, trainer_cfg.train_frac)
+    train_artifact, val_artifact = _split_artifact(
+        artifact, trainer_cfg.train_frac, embargo=trainer_cfg.embargo
+    )
     generator = torch.Generator()
     generator.manual_seed(trainer_cfg.seed)
     torch.manual_seed(trainer_cfg.seed)
@@ -547,6 +560,7 @@ def run_training_feats(
                 {
                     "model_state_dict": model.state_dict(),
                     "step": step,
+                    "val_nll": metrics["val_nll"],  # Sprint 058
                     "config": {
                         "vocab_size": model_cfg.vocab_size,
                         "context_len": model_cfg.context_len,
@@ -558,10 +572,7 @@ def run_training_feats(
                 },
                 ckpt_path,
             )
-            latest_symlink = checkpoint_dir / f"{run_id}-latest.pt"
-            if latest_symlink.exists() or latest_symlink.is_symlink():
-                latest_symlink.unlink()
-            os.symlink(ckpt_path.name, latest_symlink)
+            _update_latest_symlink(checkpoint_dir, run_id, ckpt_path)
             emitter.emit(
                 "CHECKPOINT_WRITTEN",
                 run_id=run_id,
@@ -576,6 +587,8 @@ def run_training_feats(
                 val_top3=metrics["val_top3"],
             )
             n_checkpoints += 1
+            if trainer_cfg.keep_top_k > 0:
+                _prune_checkpoints_to_top_k(checkpoint_dir, run_id, trainer_cfg.keep_top_k)
 
     tokens_consumed = n_steps_done * trainer_cfg.batch_size * model_cfg.context_len
     tokens_per_epoch = max(train_artifact.targets.shape[0], 1)
@@ -597,6 +610,44 @@ def run_training_feats(
         checkpoint_dir=str(checkpoint_dir),
         elapsed_seconds=time.monotonic() - t0,
     )
+
+
+def _update_latest_symlink(checkpoint_dir: Path, run_id: str, target_ckpt: Path) -> None:
+    """Point `{run_id}-latest.pt` at `target_ckpt`. Sprint 036 discipline."""
+    latest = checkpoint_dir / f"{run_id}-latest.pt"
+    if latest.exists() or latest.is_symlink():
+        latest.unlink()
+    os.symlink(target_ckpt.name, latest)
+
+
+def _prune_checkpoints_to_top_k(checkpoint_dir: Path, run_id: str, keep_top_k: int) -> None:
+    """Sprint 058: keep only the top-K checkpoints ranked by val_nll ascending.
+
+    Reads `val_nll` from each `.pt` file's saved dict. Files without val_nll are
+    treated as +inf (worst) and pruned first. Updates the `-latest.pt` symlink
+    to point at the best-ranked kept checkpoint if the prior latest was pruned.
+    """
+    if keep_top_k <= 0:
+        return
+    files = sorted(checkpoint_dir.glob(f"{run_id}-step*.pt"))
+    ranked: list[tuple[float, Path]] = []
+    for path in files:
+        try:
+            payload = torch.load(path, weights_only=False, map_location="cpu")
+            val_nll = float(payload.get("val_nll", math.inf))
+        except (RuntimeError, ValueError, KeyError):
+            val_nll = math.inf
+        ranked.append((val_nll, path))
+    ranked.sort(key=lambda pair: pair[0])
+    to_keep = {p for _, p in ranked[:keep_top_k]}
+    for _, path in ranked:
+        if path not in to_keep:
+            path.unlink(missing_ok=True)
+    # Refresh latest symlink to the best kept checkpoint (lowest val_nll).
+    if ranked:
+        best_path = ranked[0][1]
+        if best_path in to_keep:
+            _update_latest_symlink(checkpoint_dir, run_id, best_path)
 
 
 def _grad_norm_generic(model: nn.Module) -> float:

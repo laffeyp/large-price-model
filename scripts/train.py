@@ -106,6 +106,14 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="Skip torch.use_deterministic_algorithms(True, warn_only=True).",
     )
+    # Sprint 058: purged embargo + top-K checkpoint selection.
+    parser.add_argument("--embargo", type=int, default=0)
+    parser.add_argument(
+        "--keep-top-k",
+        type=int,
+        default=0,
+        help="0 keeps every checkpoint; positive value prunes to top-K by val_nll.",
+    )
     args = parser.parse_args(argv)
 
     # Sprint 053: exactly one of --tokens / --tokens-pt is required.
@@ -157,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
             lr_min_frac=args.lr_min_frac,
             bf16=args.bf16,
             deterministic=args.deterministic,
+            embargo=args.embargo,
+            keep_top_k=args.keep_top_k,
         )
         device = _resolve_device(args.device)
         print(f"train: device={device}", file=sys.stderr)

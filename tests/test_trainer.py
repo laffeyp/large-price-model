@@ -299,3 +299,103 @@ def test_run_training_feats_adamw_smoke(tmp_path: Path):
     assert len(lrs) == 4
     assert lrs[0] < lrs[1]  # warmup ramp on step 1 vs 2
     assert lrs[-1] > 0
+
+
+# Sprint 058: purged embargo + top-K checkpoint ------------------------------
+
+
+def test_split_tokens_drops_embargo():
+    """Sprint 058: embargo=H removes H tokens between train and val."""
+    from price_space_llm.model.dataset import split_tokens
+
+    tokens = list(range(100))
+    train, val = split_tokens(tokens, 0.8, embargo=5)
+    assert len(train) == 80
+    assert val[0] == 85  # 80 train + 5 embargo → val starts at index 85
+    assert len(val) == 15
+
+
+def test_split_tokens_default_embargo_is_zero():
+    """Back-compat: pre-Sprint-058 callers see the same split."""
+    from price_space_llm.model.dataset import split_tokens
+
+    tokens = list(range(100))
+    train, val = split_tokens(tokens, 0.8)
+    assert len(train) == 80
+    assert val[0] == 80
+    assert len(val) == 20
+
+
+def test_split_tokens_rejects_negative_embargo():
+    from price_space_llm.model.dataset import split_tokens
+
+    with pytest.raises(ValueError, match="embargo must be >= 0"):
+        split_tokens(list(range(100)), 0.8, embargo=-1)
+
+
+def test_prune_checkpoints_to_top_k(tmp_path: Path):
+    """Sprint 058: prune keeps K checkpoints ranked by val_nll ascending."""
+    from price_space_llm.model.trainer import _prune_checkpoints_to_top_k
+
+    run_id = "test-prune"
+    # Write 5 dummy checkpoints with distinct val_nll.
+    val_nlls = [3.5, 3.2, 3.0, 3.7, 3.1]
+    for step, val_nll in enumerate(val_nlls, start=1):
+        p = tmp_path / f"{run_id}-step{step:08d}.pt"
+        torch.save({"val_nll": val_nll, "step": step}, p)
+    _prune_checkpoints_to_top_k(tmp_path, run_id, keep_top_k=2)
+    remaining = sorted(tmp_path.glob(f"{run_id}-step*.pt"))
+    assert len(remaining) == 2
+    # Top-2 by val_nll ascending → steps 3 (3.0) and 5 (3.1).
+    remaining_val_nlls = sorted(
+        float(torch.load(p, weights_only=False)["val_nll"]) for p in remaining
+    )
+    assert remaining_val_nlls == [3.0, 3.1]
+
+
+def test_run_training_feats_writes_val_nll_into_checkpoint(tmp_path: Path):
+    """Sprint 058: val_nll lives in the .pt payload for later ranking."""
+    from price_space_llm.model import MarketStateTransformerConfig, run_training_feats
+    from price_space_llm.model.dataset import TokenizedArtifact
+
+    n = 500
+    torch.manual_seed(0)
+    artifact = TokenizedArtifact(
+        features={"target__SPY": torch.randn(n, 4)},
+        targets=torch.randint(0, 32, (n,), dtype=torch.int64),
+        vol=torch.zeros(n),
+        timestamps=torch.arange(n, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.ones(n, dtype=torch.bool),
+        channel_names=("target__SPY",),
+        meta={},
+    )
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=64,
+        channel_dims={"target__SPY": 4},
+    )
+    tcfg = TrainerConfig(
+        n_steps=2,
+        batch_size=2,
+        lr=3e-4,
+        eval_every=2,
+        seed=0,
+        warmup_steps=1,
+        deterministic=False,
+    )
+    e = _fresh_emitter()
+    result = run_training_feats(
+        artifact=artifact,
+        trainer_cfg=tcfg,
+        model_cfg=cfg,
+        emitter=e,
+        run_id="val-in-ckpt",
+        checkpoint_dir=tmp_path / "ckpts",
+    )
+    assert result.n_checkpoints == 1
+    ckpts = list((tmp_path / "ckpts").glob("val-in-ckpt-step*.pt"))
+    assert len(ckpts) == 1
+    payload = torch.load(ckpts[0], weights_only=False)
+    assert "val_nll" in payload
+    assert isinstance(payload["val_nll"], float)

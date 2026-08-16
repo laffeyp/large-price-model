@@ -90,12 +90,22 @@ class WindowSampler:
         return tuple(int(x) for x in starts.tolist())
 
 
-def split_tokens(tokens: list[int], train_frac: float) -> tuple[list[int], list[int]]:
-    """Contiguous split: first `train_frac` fraction is train, rest is val."""
+def split_tokens(
+    tokens: list[int], train_frac: float, embargo: int = 0
+) -> tuple[list[int], list[int]]:
+    """Contiguous split with an optional purged embargo at the boundary.
+
+    Sprint 058: `embargo` drops that many tokens between train and val so the
+    val window's first target does not see the training window's last input.
+    Spec § Testing + § 9.2. Default `embargo=0` preserves the pre-Sprint-058
+    behavior for callers that don't opt in.
+    """
     if not 0.0 < train_frac < 1.0:
         raise ValueError(f"train_frac must be in (0, 1); got {train_frac}")
+    if embargo < 0:
+        raise ValueError(f"embargo must be >= 0; got {embargo}")
     n_train = int(len(tokens) * train_frac)
-    return tokens[:n_train], tokens[n_train:]
+    return tokens[:n_train], tokens[n_train + embargo :]
 
 
 # Sprint 052: extended tokenized artifact reader ---------------------------
