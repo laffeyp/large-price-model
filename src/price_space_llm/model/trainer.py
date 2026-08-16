@@ -15,6 +15,7 @@ gradient_explosion. Val-metric divergence is out of scope for Sprint
 031 (needs multi-epoch tracking; deferred).
 """
 
+import contextlib
 import math
 import os
 import time
@@ -51,6 +52,13 @@ class TrainerConfig:
     train_frac: float = 0.8
     grad_clip: float = 1.0
     seed: int = 0
+    # Sprint 057: AdamW + cosine LR + bf16 + deterministic per tech-arch § 9.2.
+    warmup_steps: int = 2000
+    lr_min_frac: float = 0.1
+    weight_decay: float = 0.1
+    betas: tuple[float, float] = (0.9, 0.95)
+    bf16: bool = False
+    deterministic: bool = True
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -427,7 +435,19 @@ def run_training_feats(
 
     torch_device = torch.device(device)
     model = MarketStateTransformer(model_cfg).to(torch_device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=trainer_cfg.lr)
+
+    # Sprint 057: AdamW + cosine LR + optional bf16 + deterministic mode.
+    optimizer = build_adamw_with_param_groups(
+        model,
+        lr=trainer_cfg.lr,
+        weight_decay=trainer_cfg.weight_decay,
+        betas=trainer_cfg.betas,
+    )
+    use_bf16 = trainer_cfg.bf16 or torch_device.type == "cuda"
+    if trainer_cfg.deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        with contextlib.suppress(RuntimeError, AttributeError):
+            torch.use_deterministic_algorithms(True, warn_only=True)
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
@@ -438,6 +458,17 @@ def run_training_feats(
 
     for step in range(1, trainer_cfg.n_steps + 1):
         step_t0 = time.monotonic()
+        # Sprint 057: per-step LR via cosine-with-warmup.
+        current_lr = cosine_with_warmup_lr(
+            step,
+            warmup_steps=trainer_cfg.warmup_steps,
+            total_steps=trainer_cfg.n_steps,
+            base_lr=trainer_cfg.lr,
+            min_frac=trainer_cfg.lr_min_frac,
+        )
+        for group in optimizer.param_groups:
+            group["lr"] = current_lr
+
         batch = train_sampler.sample()
         emitter.emit(
             "WINDOW_SAMPLED",
@@ -447,12 +478,21 @@ def run_training_feats(
         )
         feats = {k: v.to(torch_device) for k, v in batch.feats.items()}
         targets = batch.targets.to(torch_device)
-        logits = model(feats)
-        loss = F.cross_entropy(
-            logits.reshape(-1, model_cfg.vocab_size),
-            targets.reshape(-1),
-            ignore_index=-100,
-        )
+        if use_bf16:
+            with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16):
+                logits = model(feats)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, model_cfg.vocab_size),
+                    targets.reshape(-1),
+                    ignore_index=-100,
+                )
+        else:
+            logits = model(feats)
+            loss = F.cross_entropy(
+                logits.reshape(-1, model_cfg.vocab_size),
+                targets.reshape(-1),
+                ignore_index=-100,
+            )
         train_loss = float(loss.item())
 
         if math.isnan(train_loss) or math.isinf(train_loss):
@@ -492,7 +532,7 @@ def run_training_feats(
             run_id=run_id,
             step=step,
             train_loss=train_loss,
-            lr=float(trainer_cfg.lr),
+            lr=current_lr,
             grad_norm=grad_norm,
             throughput_tokens_per_sec=throughput,
         )
@@ -565,3 +605,59 @@ def _grad_norm_generic(model: nn.Module) -> float:
         if p.grad is not None:
             total += float((p.grad.detach() ** 2).sum().item())
     return math.sqrt(total)
+
+
+# Sprint 057: AdamW + cosine LR + bf16 + deterministic per tech-arch § 9.2 -----
+
+
+def build_adamw_with_param_groups(
+    model: nn.Module,
+    *,
+    lr: float,
+    weight_decay: float,
+    betas: tuple[float, float],
+) -> torch.optim.AdamW:
+    """Split params into 2D+ (weight_decay applied) vs 1D (weight_decay=0) groups.
+
+    Standard GPT-family recipe: biases + LayerNorm gains skip weight decay because
+    they are per-neuron scalars whose regularization pulls them toward zero rather
+    than a beneficial small value.
+    """
+    decay: list[torch.nn.Parameter] = []
+    no_decay: list[torch.nn.Parameter] = []
+    for p in model.parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() >= 2:
+            decay.append(p)
+        else:
+            no_decay.append(p)
+    return torch.optim.AdamW(
+        [
+            {"params": decay, "weight_decay": weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=lr,
+        betas=betas,
+    )
+
+
+def cosine_with_warmup_lr(
+    step: int, *, warmup_steps: int, total_steps: int, base_lr: float, min_frac: float
+) -> float:
+    """Linear warmup for `warmup_steps`; cosine decay to `base_lr * min_frac` at
+    `total_steps`. `step` is 1-indexed matching the trainer loop.
+
+    At step <= 0: returns 0. At step == warmup_steps: returns base_lr.
+    At step >= total_steps: returns `base_lr * min_frac`.
+    """
+    if step <= 0:
+        return 0.0
+    if warmup_steps > 0 and step < warmup_steps:
+        return base_lr * (step / warmup_steps)
+    if step >= total_steps:
+        return base_lr * min_frac
+    # Cosine decay from base_lr at warmup_steps to base_lr*min_frac at total_steps.
+    progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return base_lr * (min_frac + (1.0 - min_frac) * cosine)

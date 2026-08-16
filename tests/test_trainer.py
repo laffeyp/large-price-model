@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+import torch
 
 from price_space_llm.model.trainer import (
     TrainerConfig,
@@ -197,3 +198,104 @@ def test_run_training_is_deterministic_with_seed(tmp_path: Path):
         checkpoint_dir=tmp_path / "ckpt2",
     )
     assert abs(r1.final_train_loss - r2.final_train_loss) < 1e-4
+
+
+# Sprint 057: AdamW + cosine + bf16 + deterministic ---------------------------
+
+
+def test_build_adamw_param_group_split():
+    """Sprint 057: 2D+ params get weight_decay, 1D params (biases + LayerNorm) get 0."""
+    from price_space_llm.model.trainer import build_adamw_with_param_groups
+
+    model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.LayerNorm(8))
+    opt = build_adamw_with_param_groups(model, lr=3e-4, weight_decay=0.1, betas=(0.9, 0.95))
+    assert len(opt.param_groups) == 2
+    decay_group = opt.param_groups[0]
+    no_decay_group = opt.param_groups[1]
+    assert decay_group["weight_decay"] == 0.1
+    assert no_decay_group["weight_decay"] == 0.0
+    # Linear weight (2D) in decay; Linear bias + LayerNorm weight + bias (1D) in no-decay.
+    assert len(decay_group["params"]) == 1
+    assert len(no_decay_group["params"]) == 3
+
+
+def test_cosine_with_warmup_lr_shape():
+    """Sprint 057: linear warmup then cosine decay to base_lr * min_frac."""
+    from price_space_llm.model.trainer import cosine_with_warmup_lr
+
+    warmup, total, base, min_frac = 100, 1000, 3e-4, 0.1
+    assert (
+        cosine_with_warmup_lr(
+            0, warmup_steps=warmup, total_steps=total, base_lr=base, min_frac=min_frac
+        )
+        == 0.0
+    )
+    # Halfway through warmup.
+    lr_50 = cosine_with_warmup_lr(
+        50, warmup_steps=warmup, total_steps=total, base_lr=base, min_frac=min_frac
+    )
+    assert abs(lr_50 - base * 0.5) < 1e-9
+    # At end of warmup.
+    lr_warm = cosine_with_warmup_lr(
+        warmup, warmup_steps=warmup, total_steps=total, base_lr=base, min_frac=min_frac
+    )
+    assert abs(lr_warm - base) < 1e-9
+    # At total_steps.
+    lr_end = cosine_with_warmup_lr(
+        total, warmup_steps=warmup, total_steps=total, base_lr=base, min_frac=min_frac
+    )
+    assert abs(lr_end - base * min_frac) < 1e-9
+    # Beyond total_steps clamps to min.
+    lr_over = cosine_with_warmup_lr(
+        total + 100, warmup_steps=warmup, total_steps=total, base_lr=base, min_frac=min_frac
+    )
+    assert abs(lr_over - base * min_frac) < 1e-9
+
+
+def test_run_training_feats_adamw_smoke(tmp_path: Path):
+    """Sprint 057: run_training_feats with AdamW + cosine completes 4 steps."""
+    from price_space_llm.model import MarketStateTransformerConfig, run_training_feats
+    from price_space_llm.model.dataset import TokenizedArtifact
+
+    n = 400
+    torch.manual_seed(0)
+    artifact = TokenizedArtifact(
+        features={"target__SPY": torch.randn(n, 4), "market_context__VIX": torch.randn(n, 3)},
+        targets=torch.randint(0, 32, (n,), dtype=torch.int64),
+        vol=torch.zeros(n, dtype=torch.float32),
+        timestamps=torch.arange(n, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.ones(n, dtype=torch.bool),
+        channel_names=("market_context__VIX", "target__SPY"),
+        meta={},
+    )
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=64,
+        channel_dims={"target__SPY": 4, "market_context__VIX": 3},
+    )
+    trainer_cfg = TrainerConfig(
+        n_steps=4,
+        batch_size=2,
+        lr=3e-4,
+        eval_every=4,
+        seed=0,
+        warmup_steps=2,  # tiny for a 4-step smoke
+        weight_decay=0.1,
+        deterministic=False,  # skip global deterministic flag inside the test
+    )
+    e = _fresh_emitter()
+    result = run_training_feats(
+        artifact=artifact,
+        trainer_cfg=trainer_cfg,
+        model_cfg=cfg,
+        emitter=e,
+        run_id="adamw-smoke",
+        checkpoint_dir=tmp_path / "ckpts",
+    )
+    assert result.final_step == 4
+    # LR emits differ across steps due to warmup ramp + cosine decay.
+    lrs = [s.payload["lr"] for s in e.snapshot() if s.tag == "TRAINING_STEP_COMPLETED"]
+    assert len(lrs) == 4
+    assert lrs[0] < lrs[1]  # warmup ramp on step 1 vs 2
+    assert lrs[-1] > 0

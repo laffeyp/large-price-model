@@ -90,6 +90,22 @@ def main(argv: list[str] | None = None) -> int:
         choices=("cpu", "cuda", "mps", "auto"),
         default="auto",
     )
+    # Sprint 057: AdamW + cosine + bf16 + deterministic knobs.
+    parser.add_argument("--warmup-steps", type=int, default=2000)
+    parser.add_argument("--weight-decay", type=float, default=0.1)
+    parser.add_argument("--lr-min-frac", type=float, default=0.1)
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Enable bfloat16 autocast. Auto-on for cuda; opt-in for cpu/mps.",
+    )
+    parser.add_argument(
+        "--no-deterministic",
+        dest="deterministic",
+        action="store_false",
+        default=True,
+        help="Skip torch.use_deterministic_algorithms(True, warn_only=True).",
+    )
     args = parser.parse_args(argv)
 
     # Sprint 053: exactly one of --tokens / --tokens-pt is required.
@@ -136,6 +152,11 @@ def main(argv: list[str] | None = None) -> int:
             lr=args.lr,
             eval_every=args.eval_every,
             seed=args.seed,
+            warmup_steps=args.warmup_steps,
+            weight_decay=args.weight_decay,
+            lr_min_frac=args.lr_min_frac,
+            bf16=args.bf16,
+            deterministic=args.deterministic,
         )
         device = _resolve_device(args.device)
         print(f"train: device={device}", file=sys.stderr)
