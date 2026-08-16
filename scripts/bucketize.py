@@ -84,6 +84,20 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("data/manifests/channel_coverage.json"),
         help="Recorded in the .pt artifact's meta.channel_coverage_sha field.",
     )
+    # Sprint 054: frozen normalizer per product-spec § Feature normalization.
+    parser.add_argument(
+        "--fit-normalizer",
+        action="store_true",
+        help="Fit per-(channel, feature) mean + std on the training partition, "
+        "persist to --normalizer-path, and apply before writing the .pt artifact. "
+        "Requires --format pt or --format both.",
+    )
+    parser.add_argument(
+        "--normalizer-path",
+        type=Path,
+        default=Path("artifacts/tokenizer/normalizers.pt"),
+        help="Frozen normalizer destination (versioned via write_versioned).",
+    )
     args = parser.parse_args(argv)
 
     if not args.features.exists():
@@ -155,6 +169,47 @@ def main(argv: list[str] | None = None) -> int:
                     stats = load_bucket_stats(
                         latest_stats if latest_stats.exists() else args.bucket_stats
                     )
+                # Sprint 054: optional frozen normalizer fit + apply.
+                normalizer = None
+                if args.fit_normalizer:
+                    from price_space_llm.model.dataset import load_tokens_pt
+                    from price_space_llm.normalizer import (
+                        fit_frozen_normalizer,
+                        write_frozen_normalizer,
+                    )
+
+                    # Two-pass: first write an unnormalized .pt to get shapes,
+                    # then fit + write normalizer, then re-materialize with
+                    # normalization applied. Simpler than fitting off the parquet
+                    # directly (avoids duplicating the per-channel column discovery).
+                    intermediate = run_tokenizer_pt(
+                        features_path=args.features,
+                        output_dir=args.output_dir,
+                        stats=stats,
+                        target_symbol=cfg.target_symbol,
+                        emitter=emitter,
+                        run_id=f"{run_id}-pre-norm",
+                        channel_coverage_path=args.channel_coverage,
+                        config_hash=config_hash,
+                        data_hash=data_hash,
+                        git_sha_value=git_sha() or "unknown",
+                    )
+                    intermediate_artifact = load_tokens_pt(intermediate)
+                    normalizer = fit_frozen_normalizer(
+                        intermediate_artifact,
+                        training_range_start=args.training_start.isoformat(),
+                        training_range_end=args.training_end.isoformat(),
+                        emitter=emitter,
+                        run_id=run_id,
+                    )
+                    write_frozen_normalizer(
+                        normalizer,
+                        args.normalizer_path,
+                        emitter,
+                        run_id=run_id,
+                    )
+                    # Clean up the intermediate.
+                    intermediate.unlink(missing_ok=True)
                 pt_output_path = run_tokenizer_pt(
                     features_path=args.features,
                     output_dir=args.output_dir,
@@ -166,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                     config_hash=config_hash,
                     data_hash=data_hash,
                     git_sha_value=git_sha() or "unknown",
+                    normalizer=normalizer,
                 )
         except (FileNotFoundError, ValueError):
             traceback.print_exc(file=sys.stderr)

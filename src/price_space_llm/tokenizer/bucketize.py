@@ -15,13 +15,16 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import polars as pl
 import torch
 
 from price_space_llm.signals import StrictSignalEmitter
+
+if TYPE_CHECKING:
+    from price_space_llm.normalizer import FrozenNormalizer
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -323,6 +326,7 @@ def run_tokenizer_pt(
     config_hash: str = "unknown",
     data_hash: str = "unknown",
     git_sha_value: str = "unknown",
+    normalizer: "FrozenNormalizer | None" = None,
 ) -> Path:
     """Write the extended tokenized artifact to `data/tokenized/{run_id}.pt`.
 
@@ -411,6 +415,12 @@ def run_tokenizer_pt(
         "target_symbol": target_symbol,
         "channel_coverage_sha": channel_coverage_sha,
     }
+
+    # Sprint 054: apply frozen normalizer (if supplied) before persisting.
+    if normalizer is not None:
+        from price_space_llm.normalizer import apply_frozen_normalizer
+
+        features_dict = apply_frozen_normalizer(features_dict, normalizer)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{run_id}.pt"
