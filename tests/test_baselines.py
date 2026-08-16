@@ -289,3 +289,83 @@ def test_fit_linear_is_deterministic_with_seed():
     m2 = fit_linear(tokens, vocab_size=32, context_len=16, n_steps=50, seed=7)
     for p1, p2 in zip(m1.parameters(), m2.parameters(), strict=True):
         assert torch.allclose(p1, p2, atol=1e-6)
+
+
+# Sprint 056: compute_magnitude_weights_from_stats ---------------------------
+
+
+def test_compute_magnitude_weights_from_stats_uses_train_mean():
+    """Sprint 056: weights are |train_mean| per bucket, normalized to mean 1."""
+    from price_space_llm.baselines import compute_magnitude_weights_from_stats
+    from price_space_llm.tokenizer.bucketize import BucketRow, BucketStats
+
+    rows = tuple(
+        BucketRow(
+            lower=None if i == 0 else float(i - 1),
+            upper=None if i == 3 else float(i),
+            train_mean=[-2.0, -0.5, 0.5, 2.0][i],
+            train_median=0.0,
+            train_frequency=0.25,
+        )
+        for i in range(4)
+    )
+    stats = BucketStats(
+        n_buckets=32,  # value cosmetic; per_bucket controls length
+        target_symbol="SPY",
+        training_range_start="2015-01-05",
+        training_range_end="2022-12-30",
+        train_partition_row_count=100,
+        edges=(0.0, 1.0, 2.0),
+        per_bucket=rows,
+    )
+    w = compute_magnitude_weights_from_stats(stats)
+    # abs means = [2.0, 0.5, 0.5, 2.0] → mean 1.25 → weights [1.6, 0.4, 0.4, 1.6].
+    assert w.shape == (4,)
+    assert abs(w.mean().item() - 1.0) < 1e-6
+    assert abs(w[0].item() - 1.6) < 1e-6
+    assert abs(w[1].item() - 0.4) < 1e-6
+
+
+def test_compute_magnitude_weights_from_stats_zero_means_returns_ones():
+    from price_space_llm.baselines import compute_magnitude_weights_from_stats
+    from price_space_llm.tokenizer.bucketize import BucketRow, BucketStats
+
+    rows = tuple(
+        BucketRow(
+            lower=None if i == 0 else float(i - 1),
+            upper=None if i == 3 else float(i),
+            train_mean=0.0,
+            train_median=0.0,
+            train_frequency=0.25,
+        )
+        for i in range(4)
+    )
+    stats = BucketStats(
+        n_buckets=32,
+        target_symbol="SPY",
+        training_range_start="2015-01-05",
+        training_range_end="2022-12-30",
+        train_partition_row_count=100,
+        edges=(0.0, 1.0, 2.0),
+        per_bucket=rows,
+    )
+    w = compute_magnitude_weights_from_stats(stats)
+    assert torch.allclose(w, torch.ones(4), atol=1e-6)
+
+
+def test_compute_magnitude_weights_from_stats_rejects_empty_per_bucket():
+    """Sprint 056: rejects legacy stats missing the per_bucket field."""
+    from price_space_llm.baselines import compute_magnitude_weights_from_stats
+    from price_space_llm.tokenizer.bucketize import BucketStats
+
+    stats = BucketStats(
+        n_buckets=32,
+        target_symbol="SPY",
+        training_range_start="2015-01-05",
+        training_range_end="2022-12-30",
+        train_partition_row_count=100,
+        edges=(0.0, 1.0, 2.0),
+        per_bucket=(),
+    )
+    with pytest.raises(ValueError, match="per_bucket is empty"):
+        compute_magnitude_weights_from_stats(stats)

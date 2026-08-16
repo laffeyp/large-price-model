@@ -19,13 +19,16 @@ as the transformer evaluator so the val_nll comparison is apples-to-apples.
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
 from price_space_llm.evaluation.metrics import MetricSet, compute_metric_set
+
+if TYPE_CHECKING:
+    from price_space_llm.tokenizer.bucketize import BucketStats
 
 BaselineKind = Literal["linear", "target_only", "magnitude_weighted"]
 
@@ -193,6 +196,10 @@ def compute_magnitude_weights(bucket_edges: list[float], vocab_size: int) -> Ten
     (edge[i-1] + edge[i]) / 2 as the mid-value; edge buckets use the outer edge. Weights
     are absolute values, normalised so the mean weight is 1 (keeps loss scale comparable
     to unweighted CE).
+
+    Sprint 056: the midpoint-fake path stays for back-compat. Prefer
+    `compute_magnitude_weights_from_stats(bucket_stats)` which reads real per-bucket
+    `train_mean` values from the extended `bucket_stats.json` per spec § 7.1.
     """
     if len(bucket_edges) != vocab_size - 1:
         raise ValueError(
@@ -207,6 +214,35 @@ def compute_magnitude_weights(bucket_edges: list[float], vocab_size: int) -> Ten
         else:
             mids.append((bucket_edges[i - 1] + bucket_edges[i]) / 2)
     weights = torch.tensor([abs(m) for m in mids], dtype=torch.float32)
+    mean_w = weights.mean()
+    if mean_w == 0:
+        return torch.ones_like(weights)
+    return weights / mean_w
+
+
+def compute_magnitude_weights_from_stats(bucket_stats: "BucketStats") -> Tensor:
+    """Sprint 056: real per-bucket `|train_mean|` weights, normalized to mean 1.
+
+    Reads `bucket_stats.per_bucket[i].train_mean` (spec § 7.1). NaN means (empty
+    bucket) collapse to zero weight before normalization. Prefer this over
+    `compute_magnitude_weights(edges, vocab_size)` — the edge-midpoint fake
+    over-weights the outer tails and under-weights the fat middle when the
+    quantile edges are asymmetric.
+    """
+    import math
+
+    if not bucket_stats.per_bucket:
+        raise ValueError(
+            "bucket_stats.per_bucket is empty; regenerate with Sprint 056+ "
+            "tokenizer to populate per-bucket train_mean"
+        )
+    values: list[float] = []
+    for row in bucket_stats.per_bucket:
+        if math.isnan(row.train_mean):
+            values.append(0.0)
+        else:
+            values.append(abs(row.train_mean))
+    weights = torch.tensor(values, dtype=torch.float32)
     mean_w = weights.mean()
     if mean_w == 0:
         return torch.ones_like(weights)

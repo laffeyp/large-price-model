@@ -28,6 +28,24 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class BucketRow:
+    """Per-bucket statistics per spec § 7.1.
+
+    `lower` / `upper` are the bin bounds (half-open `(lower, upper]` for interior
+    buckets). `None` at either end means the open tail: `lower is None` for
+    bucket 0 (leftmost), `upper is None` for bucket n-1 (rightmost).
+    `train_mean` + `train_median` compute over training rows falling in this
+    bucket; NaN when the bucket is empty. `train_frequency` = count / total.
+    """
+
+    lower: float | None
+    upper: float | None
+    train_mean: float
+    train_median: float
+    train_frequency: float
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class BucketStats:
     n_buckets: Literal[16, 32, 64]
     target_symbol: str
@@ -35,6 +53,8 @@ class BucketStats:
     training_range_end: str  # YYYY-MM-DD
     train_partition_row_count: int
     edges: tuple[float, ...]  # len == n_buckets - 1, strictly increasing
+    # Sprint 056: per-bucket statistics per spec § 7.1. Length == n_buckets.
+    per_bucket: tuple[BucketRow, ...] = ()
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -94,6 +114,14 @@ def fit_bucketizer(
     # months (holidays, low-vol days) can produce ties at 0.0.
     edges = _dedupe_strictly_increasing(edges)
 
+    # Sprint 056: per-bucket statistics per spec § 7.1. Bin the training values
+    # against final edges and compute mean/median/frequency per bucket.
+    per_bucket = _compute_per_bucket_stats(
+        values=train_frame[col].to_list(),
+        edges=edges,
+        n_buckets=n_buckets,
+    )
+
     stats = BucketStats(
         n_buckets=n_buckets,
         target_symbol=target_symbol,
@@ -101,6 +129,7 @@ def fit_bucketizer(
         training_range_end=training_range_end.isoformat(),
         train_partition_row_count=train_partition_row_count,
         edges=edges,
+        per_bucket=per_bucket,
     )
 
     emitter.emit(
@@ -128,6 +157,59 @@ def _quantile(sorted_values: list[float], q: float) -> float:
     return sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac
 
 
+def _compute_per_bucket_stats(
+    *, values: list[float], edges: tuple[float, ...], n_buckets: int
+) -> tuple[BucketRow, ...]:
+    """Bin `values` against `edges` and return one BucketRow per bucket.
+
+    Sprint 056. bucket 0 = (None, edges[0]]; interior i = (edges[i-1], edges[i]];
+    bucket n-1 = (edges[n-2], None]. train_mean + train_median are NaN when a
+    bucket is empty. train_frequency sums to 1.0 across all buckets modulo float
+    rounding.
+    """
+    import statistics
+    from math import nan
+
+    per_bucket_values: list[list[float]] = [[] for _ in range(n_buckets)]
+    for v in values:
+        if v is None:
+            continue
+        # Match assign_buckets: bucket_id = count of edges strictly less than v.
+        lo, hi = 0, len(edges)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if edges[mid] <= v:
+                lo = mid + 1
+            else:
+                hi = mid
+        per_bucket_values[lo].append(float(v))
+
+    total = sum(len(bucket) for bucket in per_bucket_values)
+    rows: list[BucketRow] = []
+    for i in range(n_buckets):
+        lower = None if i == 0 else edges[i - 1]
+        upper = None if i == n_buckets - 1 else edges[i]
+        bucket_vals = per_bucket_values[i]
+        if bucket_vals:
+            mean = sum(bucket_vals) / len(bucket_vals)
+            median = statistics.median(bucket_vals)
+            frequency = len(bucket_vals) / total if total > 0 else 0.0
+        else:
+            mean = nan
+            median = nan
+            frequency = 0.0
+        rows.append(
+            BucketRow(
+                lower=lower,
+                upper=upper,
+                train_mean=mean,
+                train_median=median,
+                train_frequency=frequency,
+            )
+        )
+    return tuple(rows)
+
+
 def _dedupe_strictly_increasing(edges: tuple[float, ...]) -> tuple[float, ...]:
     """Nudge each tied edge up by a relative epsilon so the sequence is strictly increasing."""
     out: list[float] = []
@@ -151,10 +233,17 @@ def write_bucket_stats(
     The actual file lands at `bucket_stats.{run_id}.json` with a `bucket_stats.latest.json`
     symlink pointing at the newest write. The emit's `path` field records the
     versioned file so downstream consumers name the specific run they read.
+
+    Sprint 056: per_bucket serializes as JSON array. NaN train_mean / train_median
+    (empty bucket) write as `null` for strict-JSON portability; `None` bounds
+    (open tails) write as `null` too.
     """
     from price_space_llm.artifacts import write_versioned
 
-    body = json.dumps(asdict(stats), sort_keys=True).encode("utf-8")
+    doc = asdict(stats)
+    # Sprint 056: sanitize non-JSON-safe floats in per_bucket.
+    doc["per_bucket"] = [_row_to_jsonable(row) for row in doc.get("per_bucket", ())]
+    body = json.dumps(doc, sort_keys=True, allow_nan=False).encode("utf-8")
     result = write_versioned(output_path, run_id, body)
     emitter.emit(
         "BUCKET_STATS_WRITTEN",
@@ -165,8 +254,43 @@ def write_bucket_stats(
     return result.sha256
 
 
+def _row_to_jsonable(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert one BucketRow-shaped dict into strict-JSON-safe form.
+
+    NaN train_mean / train_median write as `null`; None bounds already are null.
+    Reader restores NaN for empty buckets.
+    """
+    import math
+
+    out = dict(row)
+    for field in ("train_mean", "train_median"):
+        v = out.get(field)
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            out[field] = None
+    return out
+
+
+def _row_from_jsonable(doc: dict[str, Any]) -> BucketRow:
+    """Inverse of `_row_to_jsonable`. Null train_mean / train_median restore to NaN."""
+    from math import nan
+
+    train_mean_raw = doc.get("train_mean")
+    train_median_raw = doc.get("train_median")
+    train_mean = float(train_mean_raw) if train_mean_raw is not None else nan
+    train_median = float(train_median_raw) if train_median_raw is not None else nan
+    return BucketRow(
+        lower=doc.get("lower"),
+        upper=doc.get("upper"),
+        train_mean=train_mean,
+        train_median=train_median,
+        train_frequency=float(doc.get("train_frequency", 0.0)),
+    )
+
+
 def load_bucket_stats(path: Path) -> BucketStats:
     doc = json.loads(path.read_text(encoding="utf-8"))
+    per_bucket_raw = doc.get("per_bucket", [])
+    per_bucket = tuple(_row_from_jsonable(r) for r in per_bucket_raw)
     return BucketStats(
         n_buckets=doc["n_buckets"],
         target_symbol=doc["target_symbol"],
@@ -174,6 +298,7 @@ def load_bucket_stats(path: Path) -> BucketStats:
         training_range_end=doc["training_range_end"],
         train_partition_row_count=doc["train_partition_row_count"],
         edges=tuple(doc["edges"]),
+        per_bucket=per_bucket,
     )
 
 

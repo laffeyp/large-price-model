@@ -10,6 +10,7 @@ from hypothesis import strategies as st
 
 from price_space_llm.signals import StrictSignalEmitter, load_vocabulary
 from price_space_llm.tokenizer.bucketize import (
+    BucketRow,
     assign_buckets,
     fit_bucketizer,
     load_bucket_stats,
@@ -454,3 +455,126 @@ def test_edges_are_strictly_increasing(values: list[float]) -> None:
     )
     for a, b in zip(stats.edges[:-1], stats.edges[1:], strict=True):
         assert a < b
+
+
+# Sprint 056: extended bucket_stats.json schema ---------------------------
+
+
+def test_fit_bucketizer_populates_per_bucket_shape():
+    """Sprint 056: per_bucket has exactly n_buckets entries."""
+    features = _synthetic_features(n_rows=500)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 12, 31),
+        emitter=e,
+    )
+    assert len(stats.per_bucket) == 32
+    assert all(isinstance(r, BucketRow) for r in stats.per_bucket)
+
+
+def test_per_bucket_open_tails_and_interior_bounds_match_edges():
+    features = _synthetic_features(n_rows=500)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 12, 31),
+        emitter=e,
+    )
+    assert stats.per_bucket[0].lower is None
+    assert stats.per_bucket[-1].upper is None
+    for i in range(1, 31):
+        assert stats.per_bucket[i].lower == stats.edges[i - 1]
+        assert stats.per_bucket[i].upper == stats.edges[i]
+
+
+def test_per_bucket_frequency_sums_to_one():
+    features = _synthetic_features(n_rows=500)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 12, 31),
+        emitter=e,
+    )
+    total_freq = sum(r.train_frequency for r in stats.per_bucket)
+    assert abs(total_freq - 1.0) < 1e-9
+
+
+def test_per_bucket_train_mean_monotone_across_buckets():
+    features = _synthetic_features(n_rows=1000)  # uniform spread
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 12, 31),
+        emitter=e,
+    )
+    from itertools import pairwise
+
+    means = [r.train_mean for r in stats.per_bucket]
+    for a, b in pairwise(means):
+        assert a <= b
+
+
+def test_write_bucket_stats_json_is_strict(tmp_path: Path):
+    """Sprint 056: JSON output rejects Infinity; open-tail bounds are `null`."""
+    features = _synthetic_features(n_rows=500)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 12, 31),
+        emitter=e,
+    )
+    base_path = tmp_path / "bucket_stats.json"
+    write_bucket_stats(stats, base_path, e, run_id="strict-json")
+    written = tmp_path / "bucket_stats.strict-json.json"
+    text = written.read_text(encoding="utf-8")
+    assert "Infinity" not in text
+    import json as _json
+
+    doc = _json.loads(text)
+    assert len(doc["per_bucket"]) == 32
+    assert doc["per_bucket"][0]["lower"] is None
+    assert doc["per_bucket"][-1]["upper"] is None
+
+
+def test_write_load_roundtrip_preserves_per_bucket(tmp_path: Path):
+    features = _synthetic_features(n_rows=500)
+    e = _fresh_emitter()
+    original = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 12, 31),
+        emitter=e,
+    )
+    base_path = tmp_path / "bucket_stats.json"
+    write_bucket_stats(original, base_path, e, run_id="roundtrip")
+    written = tmp_path / "bucket_stats.roundtrip.json"
+    loaded = load_bucket_stats(written)
+    assert len(loaded.per_bucket) == 32
+    import math
+
+    for orig_row, load_row in zip(original.per_bucket, loaded.per_bucket, strict=True):
+        assert orig_row.lower == load_row.lower
+        assert orig_row.upper == load_row.upper
+        assert abs(orig_row.train_frequency - load_row.train_frequency) < 1e-9
+        if math.isnan(orig_row.train_mean):
+            assert math.isnan(load_row.train_mean)
+        else:
+            assert abs(orig_row.train_mean - load_row.train_mean) < 1e-9
