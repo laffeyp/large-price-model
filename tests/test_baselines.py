@@ -369,3 +369,37 @@ def test_compute_magnitude_weights_from_stats_rejects_empty_per_bucket():
     )
     with pytest.raises(ValueError, match="per_bucket is empty"):
         compute_magnitude_weights_from_stats(stats)
+
+
+# Sprint 059: MLP baseline ---------------------------------------------------
+
+
+def test_mlp_baseline_forward_shape():
+    """Sprint 059: MLPBaseline((B, T)) → (B, V)."""
+    from price_space_llm.baselines import MLPBaseline
+
+    model = MLPBaseline(vocab_size=32, context_len=16)
+    tokens = torch.randint(0, 32, (4, 16))
+    logits = model(tokens)
+    assert logits.shape == (4, 32)
+
+
+def test_fit_mlp_is_deterministic_with_seed():
+    from price_space_llm.baselines import fit_mlp
+
+    tokens = _synthetic_tokens(400)
+    m1 = fit_mlp(tokens, vocab_size=32, context_len=16, n_steps=30, seed=11)
+    m2 = fit_mlp(tokens, vocab_size=32, context_len=16, n_steps=30, seed=11)
+    for p1, p2 in zip(m1.parameters(), m2.parameters(), strict=True):
+        assert torch.allclose(p1, p2, atol=1e-6)
+
+
+def test_fit_and_eval_mlp():
+    from price_space_llm.baselines import fit_and_eval
+
+    train = _synthetic_tokens(400)
+    val = _synthetic_tokens(200)
+    result = fit_and_eval("mlp", train, val, vocab_size=32, context_len=16, seed=7)
+    assert result.kind == "mlp"
+    assert result.baseline_run_id.startswith("baseline-mlp-")
+    assert result.val_metrics.nll > 0

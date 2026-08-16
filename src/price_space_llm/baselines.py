@@ -30,7 +30,7 @@ from price_space_llm.evaluation.metrics import MetricSet, compute_metric_set
 if TYPE_CHECKING:
     from price_space_llm.tokenizer.bucketize import BucketStats
 
-BaselineKind = Literal["linear", "target_only", "magnitude_weighted"]
+BaselineKind = Literal["linear", "target_only", "magnitude_weighted", "mlp"]
 
 # Product-spec pre-registered gate: minimum val-NLL improvement of the
 # transformer over each baseline.
@@ -38,6 +38,7 @@ REQUIRED_DELTA_PCT: dict[BaselineKind, float] = {
     "linear": 10.0,
     "target_only": 5.0,
     "magnitude_weighted": 5.0,
+    "mlp": 5.0,  # Sprint 059: matches the target_only / gru_tcn tier.
 }
 
 
@@ -75,6 +76,34 @@ class LinearBaseline(nn.Module):
         one_hot = F.one_hot(tokens, self.vocab_size).float()
         flat = one_hot.reshape(tokens.shape[0], -1)
         return self.linear(flat)  # type: ignore[no-any-return]
+
+
+class MLPBaseline(nn.Module):
+    """Sprint 059: small 3-layer MLP over flattened one-hot context tokens.
+
+    Architecture per product-spec § Baselines: `Linear(T*V, 128) → GELU →
+    Linear(128, 64) → GELU → Linear(64, 32) → Linear(32, V)`. Predicts next
+    token from `context_len` prior tokens, matching `LinearBaseline`'s API.
+    """
+
+    def __init__(self, vocab_size: int, context_len: int) -> None:
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_len = context_len
+        self.trunk = nn.Sequential(
+            nn.Linear(context_len * vocab_size, 128),
+            nn.GELU(),
+            nn.Linear(128, 64),
+            nn.GELU(),
+            nn.Linear(64, 32),
+        )
+        self.head = nn.Linear(32, vocab_size)
+
+    def forward(self, tokens: Tensor) -> Tensor:  # (B, T) -> (B, V)
+        one_hot = F.one_hot(tokens, self.vocab_size).float()
+        flat = one_hot.reshape(tokens.shape[0], -1)
+        h = self.trunk(flat)
+        return self.head(h)  # type: ignore[no-any-return]
 
 
 class TargetOnlyBaseline:
@@ -175,6 +204,53 @@ def eval_linear(
     return compute_metric_set(probs, targets, vocab_size)
 
 
+def fit_mlp(
+    train_tokens: list[int],
+    *,
+    vocab_size: int,
+    context_len: int,
+    n_steps: int = 200,
+    batch_size: int = 32,
+    lr: float = 1e-3,
+    seed: int = 0,
+) -> MLPBaseline:
+    """Sprint 059: Adam-fit `MLPBaseline` on all valid windows. Deterministic given seed."""
+    torch.manual_seed(seed)
+    generator = torch.Generator().manual_seed(seed)
+    inputs, targets = _build_windows(train_tokens, context_len)
+    if inputs.shape[0] == 0:
+        raise ValueError(
+            f"need at least {context_len + 1} tokens to build one window; got {len(train_tokens)}"
+        )
+    model = MLPBaseline(vocab_size, context_len)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    n = inputs.shape[0]
+    for _ in range(n_steps):
+        idx = torch.randint(0, n, (batch_size,), generator=generator)
+        logits = model(inputs[idx])
+        loss = F.cross_entropy(logits, targets[idx])
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()  # type: ignore[no-untyped-call]
+        optimizer.step()
+    return model
+
+
+def eval_mlp(
+    model: MLPBaseline,
+    val_tokens: list[int],
+    context_len: int,
+    vocab_size: int,
+) -> MetricSet:
+    """Sprint 059: same eval shape as eval_linear (softmax then compute_metric_set)."""
+    model.eval()
+    inputs, targets = _build_windows(val_tokens, context_len)
+    if targets.shape[0] == 0:
+        return _empty_metrics()
+    with torch.no_grad():
+        probs = F.softmax(model(inputs), dim=-1)
+    return compute_metric_set(probs, targets, vocab_size)
+
+
 def eval_target_only(
     baseline: TargetOnlyBaseline,
     val_tokens: list[int],
@@ -268,6 +344,9 @@ def fit_and_eval(
     elif kind == "linear":
         linear = fit_linear(train_tokens, vocab_size=vocab_size, context_len=context_len, seed=seed)
         metrics = eval_linear(linear, val_tokens, context_len, vocab_size)
+    elif kind == "mlp":
+        mlp = fit_mlp(train_tokens, vocab_size=vocab_size, context_len=context_len, seed=seed)
+        metrics = eval_mlp(mlp, val_tokens, context_len, vocab_size)
     elif kind == "magnitude_weighted":
         if bucket_edges is None:
             raise ValueError("magnitude_weighted requires bucket_edges")
