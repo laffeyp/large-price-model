@@ -13,6 +13,8 @@ from price_space_llm.normalizer import (
     apply_frozen_normalizer,
     fit_frozen_normalizer,
     load_frozen_normalizer,
+    measure_normalizer_drift,
+    two_sample_ks,
     write_frozen_normalizer,
 )
 from price_space_llm.signals import StrictSignalEmitter, load_vocabulary
@@ -256,3 +258,177 @@ def test_apply_broadcasts_over_batch_dim():
     # Row 0 of every batch should match the un-batched transform result.
     single = apply_frozen_normalizer(artifact.features, normalizer)
     assert torch.allclose(out["target__SPY"][0], single["target__SPY"], atol=1e-6)
+
+
+# Sprint 055: drift diagnostic --------------------------------------------
+
+
+import numpy as np  # noqa: E402
+
+
+def test_two_sample_ks_identical_samples_returns_zero_and_one():
+    """Sprint 055: identical distributions produce KS=0, p=1."""
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.0, 1.0, size=1000)
+    d, p = two_sample_ks(a, a.copy())
+    assert d == 0.0
+    assert p == 1.0
+
+
+def test_two_sample_ks_detects_shift():
+    """Sprint 055: mean-shifted distributions produce large KS + small p."""
+    rng = np.random.default_rng(0)
+    a = rng.normal(0.0, 1.0, size=2000)
+    b = rng.normal(1.5, 1.0, size=2000)
+    d, p = two_sample_ks(a, b)
+    assert d > 0.3
+    assert p < 0.001
+
+
+def test_two_sample_ks_similar_distributions_p_high():
+    """Sprint 055: two samples from the same distribution should not reject."""
+    rng = np.random.default_rng(42)
+    a = rng.normal(0.0, 1.0, size=1000)
+    b = rng.normal(0.0, 1.0, size=1000)
+    d, p = two_sample_ks(a, b)
+    assert d < 0.1
+    assert p > 0.05
+
+
+def _drift_artifact(n_rows: int, mean_shift: float, seed: int) -> TokenizedArtifact:
+    """Two-channel artifact with a controllable mean shift on target__SPY."""
+    g = torch.Generator().manual_seed(seed)
+    target_feats = torch.randn(n_rows, 4, generator=g) + mean_shift
+    return TokenizedArtifact(
+        features={
+            "target__SPY": target_feats,
+            "market_context__VIX": torch.randn(n_rows, 3, generator=g),
+        },
+        targets=torch.randint(0, 32, (n_rows,), generator=g, dtype=torch.int64),
+        vol=torch.zeros(n_rows, dtype=torch.float32),
+        timestamps=torch.arange(n_rows, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.ones(n_rows, dtype=torch.bool),
+        channel_names=("market_context__VIX", "target__SPY"),
+        meta={},
+    )
+
+
+def test_measure_normalizer_drift_emits_per_feature():
+    """Sprint 055: fires one NORMALIZER_DRIFT_MEASURED per (channel, feature_index)."""
+    train = _drift_artifact(n_rows=2000, mean_shift=0.0, seed=0)
+    holdout = _drift_artifact(n_rows=500, mean_shift=0.0, seed=1)
+    e = _fresh_emitter(max_buffer=4096)
+    normalizer = fit_frozen_normalizer(
+        train,
+        training_range_start="2024-01-01",
+        training_range_end="2024-12-31",
+        emitter=e,
+        run_id="drift-fit",
+    )
+    n = measure_normalizer_drift(
+        train_artifact=train,
+        holdout_artifact=holdout,
+        normalizer=normalizer,
+        emitter=e,
+        run_id="drift",
+        plot_dir=None,
+    )
+    assert n == 4 + 3  # target 4 + VIX 3
+    drift = [s for s in e.snapshot() if s.tag == "NORMALIZER_DRIFT_MEASURED"]
+    assert len(drift) == 7
+    channels = {s.payload["channel"] for s in drift}
+    assert channels == {"target__SPY", "market_context__VIX"}
+
+
+def test_measure_normalizer_drift_flags_shifted_feature():
+    """A holdout mean-shifted vs training produces high KS + low p on target features."""
+    train = _drift_artifact(n_rows=2000, mean_shift=0.0, seed=0)
+    holdout = _drift_artifact(n_rows=500, mean_shift=2.0, seed=1)
+    e = _fresh_emitter(max_buffer=4096)
+    normalizer = fit_frozen_normalizer(
+        train,
+        training_range_start="2024-01-01",
+        training_range_end="2024-12-31",
+        emitter=e,
+        run_id="drift-shift",
+    )
+    measure_normalizer_drift(
+        train_artifact=train,
+        holdout_artifact=holdout,
+        normalizer=normalizer,
+        emitter=e,
+        run_id="drift-shift-run",
+        plot_dir=None,
+    )
+    target_drift = [
+        s
+        for s in e.snapshot()
+        if s.tag == "NORMALIZER_DRIFT_MEASURED" and s.payload["channel"] == "target__SPY"
+    ]
+    assert target_drift
+    # At least one target feature should show visible shift.
+    max_ks = max(s.payload["ks_statistic"] for s in target_drift)
+    min_p = min(s.payload["p_value"] for s in target_drift)
+    assert max_ks > 0.4
+    assert min_p < 0.001
+
+
+def test_measure_normalizer_drift_channel_mismatch_raises():
+    """Different channel sets between train and holdout must raise."""
+    train = _drift_artifact(n_rows=100, mean_shift=0.0, seed=0)
+    # Drop one channel from holdout.
+    holdout_features = {"target__SPY": train.features["target__SPY"].clone()}
+    holdout = TokenizedArtifact(
+        features=holdout_features,
+        targets=train.targets,
+        vol=train.vol,
+        timestamps=train.timestamps,
+        is_overnight_gap=None,
+        mask=train.mask,
+        channel_names=("target__SPY",),
+        meta={},
+    )
+    e = _fresh_emitter()
+    normalizer = fit_frozen_normalizer(
+        train,
+        training_range_start="2024-01-01",
+        training_range_end="2024-12-31",
+        emitter=e,
+        run_id="mismatch",
+    )
+    with pytest.raises(ValueError, match="different channel sets"):
+        measure_normalizer_drift(
+            train_artifact=train,
+            holdout_artifact=holdout,
+            normalizer=normalizer,
+            emitter=e,
+            run_id="mismatch-run",
+        )
+
+
+def test_measure_normalizer_drift_writes_pngs(tmp_path: Path):
+    """When plot_dir is set and matplotlib is importable, one PNG per feature lands."""
+    pytest.importorskip("matplotlib")
+    train = _drift_artifact(n_rows=1000, mean_shift=0.0, seed=0)
+    holdout = _drift_artifact(n_rows=500, mean_shift=0.5, seed=1)
+    e = _fresh_emitter(max_buffer=4096)
+    normalizer = fit_frozen_normalizer(
+        train,
+        training_range_start="2024-01-01",
+        training_range_end="2024-12-31",
+        emitter=e,
+        run_id="png",
+    )
+    measure_normalizer_drift(
+        train_artifact=train,
+        holdout_artifact=holdout,
+        normalizer=normalizer,
+        emitter=e,
+        run_id="png-run",
+        plot_dir=tmp_path,
+    )
+    pngs = sorted(tmp_path.glob("*.png"))
+    assert len(pngs) == 4 + 3
+    for p in pngs:
+        assert p.stat().st_size > 0
