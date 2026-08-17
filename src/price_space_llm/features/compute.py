@@ -71,6 +71,16 @@ VIX_FEATURE_SPECS: tuple[str, ...] = (
     "vix_change",
 )
 
+# Sprint 070: macro features per spec § 6.
+# delta_since_last_release: close - close-at-previous-release, carried between releases.
+# days_since_release: age_since_known_at (in bars) divided by BARS_PER_RTH_DAY.
+# countdown_to_next: deferred (needs release-schedule integration; separate sprint).
+MACRO_FEATURE_SPECS: tuple[str, ...] = (
+    "delta_since_last_release",
+    "days_since_release",
+)
+BARS_PER_RTH_DAY = 26  # 09:45..16:00 ET at 15-min = 26 bars per weekday.
+
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class FeatureResult:
@@ -270,6 +280,42 @@ def compute_features(
             feature_names = feature_names + cross_feature_names
             emit_frame = with_cross
 
+        # Sprint 070: macro features. Reads close (release-day step function) +
+        # age_since_known_at (bars since last observation, Sprint 042). Computes
+        # release-day delta carried between releases, and age in RTH days.
+        elif channel_name == "macro":
+            delta_col = f"{key}__delta_since_last_release"
+            days_col = f"{key}__days_since_release"
+            age_col = f"age_since_known_at__{key}"
+
+            diff_expr = pl.col(close_col) - pl.col(close_col).shift(1)
+            fresh_expr = (
+                pl.when(diff_expr != 0).then(diff_expr).otherwise(None)
+            )
+            with_macro = with_z.with_columns(
+                [
+                    fresh_expr.forward_fill().fill_null(0.0).alias(delta_col),
+                ]
+            )
+            # days_since_release: age in bars / BARS_PER_RTH_DAY. When
+            # age_since_known_at is absent (older aligned parquet), fall back to
+            # zero + emit failure.
+            if age_col in aligned.columns:
+                with_macro = with_macro.with_columns(
+                    [
+                        (pl.col(age_col).cast(pl.Float32) / float(BARS_PER_RTH_DAY)).alias(
+                            days_col
+                        ),
+                    ]
+                )
+            else:
+                with_macro = with_macro.with_columns(
+                    [pl.lit(None, dtype=pl.Float32).alias(days_col)]
+                )
+            out = out.hstack(with_macro.select([delta_col, days_col]))
+            feature_names = feature_names + list(MACRO_FEATURE_SPECS)
+            emit_frame = with_macro
+
         grid_ts_values = aligned["grid_ts"].to_list()
         for feature_name in feature_names:
             col_name = f"{key}__{feature_name}"
@@ -391,9 +437,10 @@ def run_feature_pipeline(
 
     channel_columns = _channel_close_columns(aligned)
 
-    # Sprint 049/069: per-channel feature counts.
+    # Sprint 049/069/070: per-channel feature counts.
     # target = FEATURE_SPECS + TARGET_FEATURE_SPECS.
     # market_context = FEATURE_SPECS + CROSS_ASSET_FEATURE_SPECS (+ VIX for symbol=VIX).
+    # macro = FEATURE_SPECS + MACRO_FEATURE_SPECS.
     # others = FEATURE_SPECS only.
     def _per_channel_count(key: str, channel_name: str) -> int:
         base = len(FEATURE_SPECS)
@@ -403,6 +450,8 @@ def run_feature_pipeline(
             symbol_name = key.split("__", 1)[1] if "__" in key else key
             vix_extra = len(VIX_FEATURE_SPECS) if symbol_name == "VIX" else 0
             return base + len(CROSS_ASSET_FEATURE_SPECS) + vix_extra
+        if channel_name == "macro":
+            return base + len(MACRO_FEATURE_SPECS)
         return base
 
     per_channel_feature_counts = sum(

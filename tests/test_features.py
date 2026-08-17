@@ -424,3 +424,66 @@ def pytest_approx(val: float, tol: float = 1e-9):
     import pytest
 
     return pytest.approx(val, abs=tol)
+
+
+# Sprint 070: macro features ---------------------------------------------
+
+
+def test_macro_delta_and_days_since_release():
+    """Sprint 070: delta = value-at-release-day, carried forward; days from age_since_known_at."""
+    n = 10
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    # macro__CPI close: 300 for 5 bars, then 305 for 5 bars → one release with delta +5.
+    macro_close = [300.0] * 5 + [305.0] * 5
+    # age_since_known_at: 0 on release; increments after.
+    age = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4]
+    df = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": [100.0] * n,
+            "target__SPY__high": [101.0] * n,
+            "target__SPY__low": [99.0] * n,
+            "target__SPY__close": [100.0] * n,
+            "target__SPY__volume": [1000] * n,
+            "macro__CPI__known_at": known_at,
+            "macro__CPI__close": macro_close,
+            "age_since_known_at__macro__CPI": age,
+        }
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    delta = features["macro__CPI__delta_since_last_release"].to_list()
+    days = features["macro__CPI__days_since_release"].to_list()
+    # Rows 0-4 pre-release: delta = 0. Row 5 release: +5. Rows 6-9 post-release: +5.
+    assert delta[0] == 0.0
+    assert delta[4] == 0.0
+    assert delta[5] == pytest_approx(5.0)
+    assert delta[9] == pytest_approx(5.0)
+    # days = age / 26.
+    assert abs(days[0] - 0.0) < 1e-6
+    assert abs(days[4] - 4 / 26) < 1e-6
+    assert abs(days[5] - 0.0) < 1e-6
+
+
+def test_macro_features_do_not_leak_to_non_macro():
+    """target + market_context channels should not carry macro features."""
+    n = 5
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    df = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": [100.0] * n,
+            "target__SPY__high": [101.0] * n,
+            "target__SPY__low": [99.0] * n,
+            "target__SPY__close": [100.0] * n,
+            "target__SPY__volume": [1000] * n,
+        }
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    for name in ("delta_since_last_release", "days_since_release"):
+        assert f"target__SPY__{name}" not in features.columns
