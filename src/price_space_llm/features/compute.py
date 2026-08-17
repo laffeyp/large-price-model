@@ -86,6 +86,13 @@ BARS_PER_RTH_DAY = 26  # 09:45..16:00 ET at 15-min = 26 bars per weekday.
 OPTIONS_FEATURE_SPECS: tuple[str, ...] = ("z_score_20d",)
 OPTIONS_ROLLING_WINDOW = 20 * BARS_PER_RTH_DAY  # 520 bars = 20 RTH days.
 
+# Sprint 072: event features per spec § 6.
+# release_flag: 1 on the exact fresh-release bar (reads observed_at_this_grid_step).
+# mins_to_next_release: minutes to next scheduled release, clipped to ±10 sessions.
+EVENT_FEATURE_SPECS: tuple[str, ...] = ("release_flag", "mins_to_next_release")
+EVENT_CLIP_SESSIONS = 10  # ±10 trading sessions.
+EVENT_CLIP_MINUTES = EVENT_CLIP_SESSIONS * BARS_PER_RTH_DAY * 15  # 3900 min = ±10 RTH days.
+
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class FeatureResult:
@@ -360,6 +367,46 @@ def compute_features(
             feature_names = feature_names + list(OPTIONS_FEATURE_SPECS)
             emit_frame = with_opts
 
+        # Sprint 072: event features. release_flag from Sprint 042's
+        # observed_at_this_grid_step staleness column; mins_to_next_release via
+        # reverse pass over the staleness column, clipped at ±10 sessions.
+        elif channel_name == "event":
+            release_col = f"{key}__release_flag"
+            mins_col = f"{key}__mins_to_next_release"
+            observed_col = f"observed_at_this_grid_step__{key}"
+
+            if observed_col in aligned.columns:
+                observed = aligned[observed_col].to_list()
+                release_flags = [1 if bool(v) else 0 for v in observed]
+                # Reverse-pass: track bars-until-next-True; scale by 15 min/bar.
+                mins_ahead: list[float] = [float(EVENT_CLIP_MINUTES)] * len(observed)
+                bars_since_next = None
+                for i in range(len(observed) - 1, -1, -1):
+                    if observed[i]:
+                        bars_since_next = 0
+                    if bars_since_next is not None:
+                        mins_ahead[i] = min(
+                            float(bars_since_next * 15), float(EVENT_CLIP_MINUTES)
+                        )
+                        bars_since_next += 1
+                with_event = with_z.with_columns(
+                    [
+                        pl.Series(release_col, release_flags, dtype=pl.Int8),
+                        pl.Series(mins_col, mins_ahead, dtype=pl.Float32),
+                    ]
+                )
+            else:
+                # Fallback: no staleness column (pre-Sprint-042 aligned parquet).
+                with_event = with_z.with_columns(
+                    [
+                        pl.lit(None, dtype=pl.Int8).alias(release_col),
+                        pl.lit(None, dtype=pl.Float32).alias(mins_col),
+                    ]
+                )
+            out = out.hstack(with_event.select([release_col, mins_col]))
+            feature_names = feature_names + list(EVENT_FEATURE_SPECS)
+            emit_frame = with_event
+
         grid_ts_values = aligned["grid_ts"].to_list()
         for feature_name in feature_names:
             col_name = f"{key}__{feature_name}"
@@ -508,6 +555,8 @@ def run_feature_pipeline(
             return base + len(MACRO_FEATURE_SPECS)
         if channel_name == "options":
             return base + len(OPTIONS_FEATURE_SPECS)
+        if channel_name == "event":
+            return base + len(EVENT_FEATURE_SPECS)
         return base
 
     per_channel_feature_counts = sum(

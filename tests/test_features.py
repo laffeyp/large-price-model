@@ -557,3 +557,76 @@ def test_options_z_score_20d_constant_run_is_null():
         and s.payload["reason"] == "divide_by_zero"
     ]
     assert len(fails) == n - (OPTIONS_ROLLING_WINDOW - 1)
+
+
+# Sprint 072: event features -------------------------------------------
+
+
+def test_event_release_flag_and_mins_to_next_release():
+    """Sprint 072: release_flag = observed_at_this_grid_step; mins_to_next_release
+    counts forward-bars * 15."""
+    n = 8
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    # Two fresh events: rows 2 and 5.
+    observed = [False, False, True, False, False, True, False, False]
+    df = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": [100.0] * n,
+            "target__SPY__high": [101.0] * n,
+            "target__SPY__low": [99.0] * n,
+            "target__SPY__close": [100.0] * n,
+            "target__SPY__volume": [1000] * n,
+            "event__FOMC__known_at": known_at,
+            "event__FOMC__close": [1.0] * n,
+            "observed_at_this_grid_step__event__FOMC": observed,
+        }
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    flag = features["event__FOMC__release_flag"].to_list()
+    mins = features["event__FOMC__mins_to_next_release"].to_list()
+    assert flag == [0, 0, 1, 0, 0, 1, 0, 0]
+    # Row 0: 2 bars ahead → 30 min. Row 1: 1 bar → 15 min. Row 2: on release → 0.
+    # Row 3: 2 bars ahead (row 5) → 30 min. Row 4: 1 bar → 15 min. Row 5: on release → 0.
+    # Rows 6-7: no next event within window → clip to EVENT_CLIP_MINUTES.
+    from price_space_llm.features.compute import EVENT_CLIP_MINUTES
+
+    assert mins[0] == pytest_approx(30.0)
+    assert mins[1] == pytest_approx(15.0)
+    assert mins[2] == pytest_approx(0.0)
+    assert mins[3] == pytest_approx(30.0)
+    assert mins[4] == pytest_approx(15.0)
+    assert mins[5] == pytest_approx(0.0)
+    assert mins[6] == pytest_approx(float(EVENT_CLIP_MINUTES))
+    assert mins[7] == pytest_approx(float(EVENT_CLIP_MINUTES))
+
+
+def test_event_mins_clipped_to_ten_sessions():
+    """Sprint 072: with no forthcoming release, mins clips at 10 sessions * 26 * 15 = 3900."""
+    n = 5
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    observed = [False] * n  # no observed events
+    df = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": [100.0] * n,
+            "target__SPY__high": [101.0] * n,
+            "target__SPY__low": [99.0] * n,
+            "target__SPY__close": [100.0] * n,
+            "target__SPY__volume": [1000] * n,
+            "event__CPI_RELEASE__known_at": known_at,
+            "event__CPI_RELEASE__close": [1.0] * n,
+            "observed_at_this_grid_step__event__CPI_RELEASE": observed,
+        }
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    from price_space_llm.features.compute import EVENT_CLIP_MINUTES
+
+    mins = features["event__CPI_RELEASE__mins_to_next_release"].to_list()
+    assert all(m == float(EVENT_CLIP_MINUTES) for m in mins)
