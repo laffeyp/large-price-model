@@ -81,6 +81,11 @@ MACRO_FEATURE_SPECS: tuple[str, ...] = (
 )
 BARS_PER_RTH_DAY = 26  # 09:45..16:00 ET at 15-min = 26 bars per weekday.
 
+# Sprint 071: options features per spec § 6 — 20-trading-day rolling z-score of
+# each options series. At 26 bars per RTH day: 20 days = 520 bars.
+OPTIONS_FEATURE_SPECS: tuple[str, ...] = ("z_score_20d",)
+OPTIONS_ROLLING_WINDOW = 20 * BARS_PER_RTH_DAY  # 520 bars = 20 RTH days.
+
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class FeatureResult:
@@ -316,6 +321,45 @@ def compute_features(
             feature_names = feature_names + list(MACRO_FEATURE_SPECS)
             emit_frame = with_macro
 
+        # Sprint 071: options features. 20-trading-day z-score of the close value
+        # (a per-bar carry from Sprint 046/047's daily-level aggregation). Uses
+        # rolling mean + std over 520 bars; when std=0 (constant options channel
+        # runs) the value flips to null via the divide_by_zero guard.
+        elif channel_name == "options":
+            z_col = f"{key}__z_score_20d"
+            roll_mean_col = f"{key}__z20d_roll_mean"
+            roll_std_col = f"{key}__z20d_roll_std"
+            with_opts = with_z.with_columns(
+                [
+                    pl.col(close_col)
+                    .rolling_mean(
+                        window_size=OPTIONS_ROLLING_WINDOW,
+                        min_samples=OPTIONS_ROLLING_WINDOW,
+                    )
+                    .alias(roll_mean_col),
+                    pl.col(close_col)
+                    .rolling_std(
+                        window_size=OPTIONS_ROLLING_WINDOW,
+                        min_samples=OPTIONS_ROLLING_WINDOW,
+                    )
+                    .alias(roll_std_col),
+                ]
+            )
+            with_opts = with_opts.with_columns(
+                [
+                    (
+                        pl.when(pl.col(roll_std_col) == 0)
+                        .then(None)
+                        .otherwise(
+                            (pl.col(close_col) - pl.col(roll_mean_col)) / pl.col(roll_std_col)
+                        )
+                    ).alias(z_col),
+                ]
+            )
+            out = out.hstack(with_opts.select([z_col]))
+            feature_names = feature_names + list(OPTIONS_FEATURE_SPECS)
+            emit_frame = with_opts
+
         grid_ts_values = aligned["grid_ts"].to_list()
         for feature_name in feature_names:
             col_name = f"{key}__{feature_name}"
@@ -417,6 +461,16 @@ def _classify_failure(
     # Sprint 069: VIX-specific vix_change uses close - close.shift(1); row 0 null.
     if feature_name == "vix_change" and row_idx == 0:
         return "insufficient_history"
+    # Sprint 071: options z_score_20d needs OPTIONS_ROLLING_WINDOW - 1 prior bars
+    # (rolling window at position i covers indices i-W+1..i inclusive; full at i=W-1).
+    if feature_name == "z_score_20d":
+        if row_idx < OPTIONS_ROLLING_WINDOW - 1:
+            return "insufficient_history"
+        roll_std_col = close_col.replace("__close", "__z20d_roll_std")
+        if roll_std_col in df.columns:
+            v = df[roll_std_col].to_list()[row_idx]
+            if v == 0:
+                return "divide_by_zero"
     return "downstream_error"
 
 
@@ -452,6 +506,8 @@ def run_feature_pipeline(
             return base + len(CROSS_ASSET_FEATURE_SPECS) + vix_extra
         if channel_name == "macro":
             return base + len(MACRO_FEATURE_SPECS)
+        if channel_name == "options":
+            return base + len(OPTIONS_FEATURE_SPECS)
         return base
 
     per_channel_feature_counts = sum(

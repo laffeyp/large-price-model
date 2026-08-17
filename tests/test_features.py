@@ -487,3 +487,73 @@ def test_macro_features_do_not_leak_to_non_macro():
     features, _ = compute_features(df, _fresh_emitter())
     for name in ("delta_since_last_release", "days_since_release"):
         assert f"target__SPY__{name}" not in features.columns
+
+
+# Sprint 071: options features -------------------------------------------
+
+
+def test_options_z_score_20d_uses_rolling_window():
+    """Sprint 071: z_score_20d is null through OPTIONS_ROLLING_WINDOW - 2 (rolling
+    window at position i covers rows i-W+1..i, so full window fills at position
+    W-1 with W rows in view)."""
+    from price_space_llm.features.compute import OPTIONS_ROLLING_WINDOW
+
+    n = OPTIONS_ROLLING_WINDOW + 5
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    # Drifting PCR values so rolling std is nonzero.
+    close = [1.0 + 0.001 * i for i in range(n)]
+    df = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": [100.0] * n,
+            "target__SPY__high": [101.0] * n,
+            "target__SPY__low": [99.0] * n,
+            "target__SPY__close": [100.0] * n,
+            "target__SPY__volume": [1000] * n,
+            "options__PCR_SPY__known_at": known_at,
+            "options__PCR_SPY__close": close,
+        }
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    z = features["options__PCR_SPY__z_score_20d"].to_list()
+    assert z[OPTIONS_ROLLING_WINDOW - 2] is None
+    assert z[OPTIONS_ROLLING_WINDOW - 1] is not None
+
+
+def test_options_z_score_20d_constant_run_is_null():
+    """Sprint 071: constant close series → std=0 → z-score null with divide_by_zero reason."""
+    from price_space_llm.features.compute import OPTIONS_ROLLING_WINDOW
+
+    n = OPTIONS_ROLLING_WINDOW + 3
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    df = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": [100.0] * n,
+            "target__SPY__high": [101.0] * n,
+            "target__SPY__low": [99.0] * n,
+            "target__SPY__close": [100.0] * n,
+            "target__SPY__volume": [1000] * n,
+            "options__VOL_SPY__known_at": known_at,
+            "options__VOL_SPY__close": [5_000_000.0] * n,
+        }
+    )
+    e = _fresh_emitter(max_buffer=131072)
+    features, _ = compute_features(df, e)
+    z = features["options__VOL_SPY__z_score_20d"].to_list()
+    for row_idx in range(OPTIONS_ROLLING_WINDOW - 1, n):
+        assert z[row_idx] is None
+    fails = [
+        s
+        for s in e.snapshot()
+        if s.tag == "FEATURE_COMPUTATION_FAILED"
+        and s.payload["feature_name"] == "z_score_20d"
+        and s.payload["reason"] == "divide_by_zero"
+    ]
+    assert len(fails) == n - (OPTIONS_ROLLING_WINDOW - 1)
