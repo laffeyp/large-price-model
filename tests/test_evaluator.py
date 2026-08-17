@@ -280,3 +280,113 @@ def test_load_features_raises_when_no_vol_column(tmp_path: Path):
     tokens.write_parquet(tpath)
     with pytest.raises(ValueError, match="lacks both"):
         _load_features_and_tokens(fpath, tpath, "SPY")
+
+
+# Sprint 068: MarketStateTransformer evaluator path ------------------------
+
+
+def test_checkpoint_is_market_state_detects_channel_dims(tmp_path: Path):
+    """Sprint 068: presence of channel_dims in the .pt payload's config marks the kind."""
+    import torch
+
+    from price_space_llm.evaluation.evaluate import _checkpoint_is_market_state
+
+    ms_ckpt = tmp_path / "ms.pt"
+    bucket_ckpt = tmp_path / "bucket.pt"
+    torch.save(
+        {"model_state_dict": {}, "config": {"channel_dims": {"target__SPY": 4}}}, ms_ckpt
+    )
+    torch.save(
+        {"model_state_dict": {}, "config": {"vocab_size": 32, "context_len": 64}}, bucket_ckpt
+    )
+    assert _checkpoint_is_market_state(ms_ckpt)
+    assert not _checkpoint_is_market_state(bucket_ckpt)
+
+
+def test_run_evaluation_feats_end_to_end(tmp_path: Path):
+    """Sprint 068: run_evaluation_feats loads a MarketStateTransformer + .pt artifact,
+    computes per-regime metrics, writes metrics.json with checkpoint_kind=market_state."""
+    import json
+
+    import polars as pl
+    import torch
+
+    from price_space_llm.evaluation.evaluate import run_evaluation_feats
+    from price_space_llm.model import MarketStateTransformerConfig
+    from price_space_llm.model.transformer import MarketStateTransformer
+
+    n_rows = 400
+    context_len = 64
+    channel_dims = {"target__SPY": 4}
+
+    # Build a checkpoint.
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=context_len,
+        channel_dims=channel_dims,
+    )
+    model = MarketStateTransformer(cfg)
+    ckpt_path = tmp_path / "market_state.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "step": 0,
+            "val_nll": 3.5,
+            "config": {
+                "vocab_size": 32,
+                "context_len": context_len,
+                "d_model": 64,
+                "n_layers": 4,
+                "n_heads": 4,
+                "channel_dims": channel_dims,
+            },
+        },
+        ckpt_path,
+    )
+
+    # Build a Sprint 052 .pt artifact.
+    torch.manual_seed(0)
+    artifact_payload = {
+        "features": {"target__SPY": torch.randn(n_rows, 4)},
+        "targets": torch.randint(0, 32, (n_rows,), dtype=torch.int64),
+        "vol": torch.zeros(n_rows, dtype=torch.float32),
+        "timestamps": torch.arange(n_rows, dtype=torch.int64),
+        "is_overnight_gap": None,
+        "mask": torch.ones(n_rows, dtype=torch.bool),
+        "channel_names": ("target__SPY",),
+        "meta": {"run_id": "test"},
+    }
+    tokens_pt = tmp_path / "tokens.pt"
+    torch.save(artifact_payload, tokens_pt)
+
+    # Build a features parquet with VIX + rolling_std for regime partitioning.
+    features_df = pl.DataFrame(
+        {
+            "grid_ts": list(range(n_rows)),
+            "market_context__VIX__close": [14.0 + 0.05 * i for i in range(n_rows)],
+        }
+    )
+    features_path = tmp_path / "features.parquet"
+    features_df.write_parquet(features_path)
+
+    e = _fresh_emitter()
+    result = run_evaluation_feats(
+        checkpoint_path=ckpt_path,
+        features_path=features_path,
+        tokens_pt_path=tokens_pt,
+        target_symbol="SPY",
+        train_frac=0.8,
+        output_dir=tmp_path / "artifacts",
+        emitter=e,
+        run_id="feats-eval",
+        training_range_start="2024-01-01",
+        training_range_end="2024-12-31",
+    )
+    assert result.n_metric_emits > 0
+    metrics = json.loads(Path(result.metrics_path).read_text())
+    assert metrics["checkpoint_kind"] == "market_state"
+    tags = [s.tag for s in e.snapshot()]
+    assert "REGIME_LABELS_FROZEN" in tags
+    assert "METRIC_COMPUTED" in tags
+    assert "BUCKET_FREQUENCY_DRIFT_MEASURED" in tags
+    assert "METRIC_SNAPSHOT_WRITTEN" in tags

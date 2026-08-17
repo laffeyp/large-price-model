@@ -15,6 +15,10 @@ from pathlib import Path
 
 from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.evaluation import run_evaluation
+from price_space_llm.evaluation.evaluate import (
+    _checkpoint_is_market_state,
+    run_evaluation_feats,
+)
 from price_space_llm.git import git_sha
 from price_space_llm.script_harness import script_session
 from price_space_llm.testlook import TestLookBudgetExhausted, register_test_look
@@ -23,7 +27,19 @@ from price_space_llm.testlook import TestLookBudgetExhausted, register_test_look
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evaluate")
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--tokens", type=Path, required=True)
+    parser.add_argument(
+        "--tokens",
+        type=Path,
+        default=None,
+        help="Bucket-ID tokens parquet. Mutually exclusive with --tokens-pt.",
+    )
+    # Sprint 068: MarketStateTransformer path uses the Sprint 052 .pt artifact.
+    parser.add_argument(
+        "--tokens-pt",
+        type=Path,
+        default=None,
+        help="Sprint 052 tokenized .pt artifact. Triggers run_evaluation_feats.",
+    )
     parser.add_argument("--features", type=Path, required=True)
     parser.add_argument(
         "--config",
@@ -82,9 +98,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    # Sprint 068: exactly one of --tokens / --tokens-pt required.
+    if bool(args.tokens) == bool(args.tokens_pt):
+        print(
+            "evaluate: pass exactly one of --tokens (bucket-ID parquet) or "
+            "--tokens-pt (market-state .pt artifact)",
+            file=sys.stderr,
+        )
+        return 1
+    tokens_path: Path = args.tokens or args.tokens_pt
+
     for label, path in (
         ("checkpoint", args.checkpoint),
-        ("tokens", args.tokens),
+        ("tokens", tokens_path),
         ("features", args.features),
     ):
         if not path.exists():
@@ -95,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = args.output_dir or Path("artifacts") / run_id
     checkpoint_bytes = args.checkpoint.read_bytes()
     config_hash = hashlib.sha256(checkpoint_bytes[:65536]).hexdigest()
-    data_hash = hashlib.sha256(args.tokens.read_bytes()).hexdigest()
+    data_hash = hashlib.sha256(tokens_path.read_bytes()).hexdigest()
 
     result = None
     with script_session(
@@ -131,18 +157,40 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
 
         try:
-            result = run_evaluation(
-                checkpoint_path=args.checkpoint,
-                features_path=args.features,
-                tokens_path=args.tokens,
-                target_symbol=cfg.target_symbol,
-                train_frac=args.train_frac,
-                output_dir=output_dir,
-                emitter=emitter,
-                run_id=run_id,
-                training_range_start=args.training_start,
-                training_range_end=args.training_end,
-            )
+            # Sprint 068: dispatch by checkpoint kind + --tokens-pt presence.
+            if args.tokens_pt is not None:
+                if not _checkpoint_is_market_state(args.checkpoint):
+                    print(
+                        "evaluate: --tokens-pt requires a MarketStateTransformer "
+                        f"checkpoint; {args.checkpoint} has no channel_dims in its config",
+                        file=sys.stderr,
+                    )
+                    return 1
+                result = run_evaluation_feats(
+                    checkpoint_path=args.checkpoint,
+                    features_path=args.features,
+                    tokens_pt_path=args.tokens_pt,
+                    target_symbol=cfg.target_symbol,
+                    train_frac=args.train_frac,
+                    output_dir=output_dir,
+                    emitter=emitter,
+                    run_id=run_id,
+                    training_range_start=args.training_start,
+                    training_range_end=args.training_end,
+                )
+            else:
+                result = run_evaluation(
+                    checkpoint_path=args.checkpoint,
+                    features_path=args.features,
+                    tokens_path=args.tokens,
+                    target_symbol=cfg.target_symbol,
+                    train_frac=args.train_frac,
+                    output_dir=output_dir,
+                    emitter=emitter,
+                    run_id=run_id,
+                    training_range_start=args.training_start,
+                    training_range_end=args.training_end,
+                )
         except (FileNotFoundError, ValueError):
             traceback.print_exc(file=sys.stderr)
             return 1
