@@ -136,22 +136,34 @@ def test_run_feature_pipeline_writes_parquet(tmp_path: Path):
 
 
 def test_two_channels_produce_expected_feature_columns():
-    """Sprint 049: target contributes FEATURE_SPECS (4) + TARGET_FEATURE_SPECS (6); a
-    non-target channel contributes FEATURE_SPECS (4) only."""
-    from price_space_llm.features.compute import TARGET_FEATURE_SPECS
+    """Sprint 049 + 069: target = FEATURE_SPECS (4) + TARGET_FEATURE_SPECS (6);
+    market_context = FEATURE_SPECS (4) + CROSS_ASSET_FEATURE_SPECS (3)."""
+    from price_space_llm.features.compute import (
+        CROSS_ASSET_FEATURE_SPECS,
+        TARGET_FEATURE_SPECS,
+    )
 
     aligned = _synthetic_aligned(n_rows=5)
     aligned = aligned.with_columns(
         [
             pl.lit(80.0).alias("market_context__USO__close"),
+            pl.lit(79.9).alias("market_context__USO__open"),
+            pl.lit(80.2).alias("market_context__USO__high"),
+            pl.lit(79.7).alias("market_context__USO__low"),
+            pl.lit(500_000).alias("market_context__USO__volume"),
             pl.col("target__SPY__known_at").alias("market_context__USO__known_at"),
         ]
     )
     e = _fresh_emitter()
     features, _ = compute_features(aligned, e)
     feature_cols = [c for c in features.columns if c != "grid_ts"]
-    expected = len(FEATURE_SPECS) + len(TARGET_FEATURE_SPECS) + len(FEATURE_SPECS)
-    assert len(feature_cols) == expected  # 4 + 6 + 4 = 14
+    expected = (
+        len(FEATURE_SPECS)
+        + len(TARGET_FEATURE_SPECS)
+        + len(FEATURE_SPECS)
+        + len(CROSS_ASSET_FEATURE_SPECS)
+    )
+    assert len(feature_cols) == expected  # 4 + 6 + 4 + 3 = 17
 
 
 # target features (Sprint 049) ---------------------------------------------
@@ -291,8 +303,10 @@ def test_volume_z_100_null_through_row_99():
     assert got[99] is not None
 
 
-def test_non_target_channels_get_no_target_features():
-    """Sprint 049: only channel_name == 'target' triggers target-feature block."""
+def test_target_only_features_do_not_leak_to_market_context():
+    """Sprint 069: target-only features (range_pct, dollar_volume, spread_proxy) do
+    not leak to market_context. Cross-asset features (bar_shape, volume_z_100,
+    realized_vol_30) DO ship on market_context per spec § 6."""
     df = _target_frame(
         n_rows=5,
         opens=[100.0] * 5,
@@ -304,14 +318,85 @@ def test_non_target_channels_get_no_target_features():
     df = df.with_columns(
         [
             pl.lit(80.0).alias("market_context__USO__close"),
+            pl.lit(79.9).alias("market_context__USO__open"),
+            pl.lit(80.2).alias("market_context__USO__high"),
+            pl.lit(79.7).alias("market_context__USO__low"),
+            pl.lit(500_000).alias("market_context__USO__volume"),
             pl.col("target__SPY__known_at").alias("market_context__USO__known_at"),
         ]
     )
     features, _ = compute_features(df, _fresh_emitter())
-    # Target has 4 base + 6 target features; USO has 4 base + 0 target.
+    # Target-only features on target, absent on market_context.
+    assert "target__SPY__range_pct" in features.columns
+    assert "target__SPY__dollar_volume" in features.columns
+    assert "target__SPY__spread_proxy" in features.columns
+    assert "market_context__USO__range_pct" not in features.columns
+    assert "market_context__USO__dollar_volume" not in features.columns
+    assert "market_context__USO__spread_proxy" not in features.columns
+    # Cross-asset features on both.
     assert "target__SPY__bar_shape" in features.columns
-    assert "market_context__USO__bar_shape" not in features.columns
+    assert "market_context__USO__bar_shape" in features.columns
+    assert "market_context__USO__realized_vol_30" in features.columns
     assert "market_context__USO__log_return" in features.columns
+
+
+def test_vix_gets_vix_level_and_vix_change():
+    """Sprint 069: VIX-only vix_level (=close) + vix_change (=close - close.shift(1))."""
+    n = 3
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n)]
+    known_at = [t + timedelta(seconds=1) for t in grid_ts]
+    df = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__open": [100.0] * n,
+            "target__SPY__high": [101.0] * n,
+            "target__SPY__low": [99.0] * n,
+            "target__SPY__close": [100.0] * n,
+            "target__SPY__volume": [1000] * n,
+            "market_context__VIX__known_at": known_at,
+            "market_context__VIX__open": [15.2, 18.5, 16.0],
+            "market_context__VIX__high": [15.2, 18.5, 16.0],
+            "market_context__VIX__low": [15.2, 18.5, 16.0],
+            "market_context__VIX__close": [15.2, 18.5, 16.0],
+            "market_context__VIX__volume": [0, 0, 0],
+        }
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    assert "market_context__VIX__vix_level" in features.columns
+    assert "market_context__VIX__vix_change" in features.columns
+    level = features["market_context__VIX__vix_level"].to_list()
+    change = features["market_context__VIX__vix_change"].to_list()
+    assert level == [15.2, 18.5, 16.0]
+    assert change[0] is None
+    assert change[1] == pytest_approx(18.5 - 15.2)
+    assert change[2] == pytest_approx(16.0 - 18.5)
+
+
+def test_non_vix_market_context_has_no_vix_features():
+    """QQQ (market_context but not VIX) does not get vix_level / vix_change."""
+    df = _target_frame(
+        n_rows=3,
+        opens=[100.0] * 3,
+        highs=[101.0] * 3,
+        lows=[99.0] * 3,
+        closes=[100.0] * 3,
+        volumes=[1000] * 3,
+    )
+    df = df.with_columns(
+        [
+            pl.lit(400.0).alias("market_context__QQQ__close"),
+            pl.lit(399.9).alias("market_context__QQQ__open"),
+            pl.lit(400.5).alias("market_context__QQQ__high"),
+            pl.lit(399.5).alias("market_context__QQQ__low"),
+            pl.lit(1_000_000).alias("market_context__QQQ__volume"),
+            pl.col("target__SPY__known_at").alias("market_context__QQQ__known_at"),
+        ]
+    )
+    features, _ = compute_features(df, _fresh_emitter())
+    assert "market_context__QQQ__vix_level" not in features.columns
+    assert "market_context__QQQ__vix_change" not in features.columns
 
 
 def test_failure_reason_insufficient_history_on_realized_vol_30():

@@ -52,6 +52,25 @@ VOLUME_ROLLING_WINDOW = 100
 REALIZED_VOL_WINDOW = 30
 BAR_SHAPE_EPS = 1e-12
 
+# Sprint 069: spec § 6 line 306 — market_context symbols get three additional
+# features (log_return already ships from the base pass). VXX carries the real
+# VIX-ecosystem volume signal per Sprint 050 substitution; VIX index has
+# volume=0 by construction, so its volume_z_100 lands as null via div-by-zero
+# guard — honest per the earlier ratification.
+CROSS_ASSET_FEATURE_SPECS: tuple[str, ...] = (
+    "realized_vol_30",
+    "volume_z_100",
+    "bar_shape",
+)
+
+# Sprint 069: VIX-only extra features per spec § 6 line 306.
+# vix_level = close (VIX is quoted in vol points).
+# vix_change = close_t - close_{t-1} (CBOE convention: absolute vol-point delta).
+VIX_FEATURE_SPECS: tuple[str, ...] = (
+    "vix_level",
+    "vix_change",
+)
+
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class FeatureResult:
@@ -187,6 +206,70 @@ def compute_features(
             feature_names = feature_names + list(TARGET_FEATURE_SPECS)
             emit_frame = with_target
 
+        # Sprint 069: cross-asset features on market_context channels. Same
+        # bar_shape / volume_z_100 / realized_vol_30 arithmetic as Sprint 049's
+        # target block minus range_pct / dollar_volume / spread_proxy (target-only
+        # per spec § 6).
+        elif channel_name == "market_context":
+            open_col = f"{key}__open"
+            high_col = f"{key}__high"
+            low_col = f"{key}__low"
+            volume_col = f"{key}__volume"
+            bar_shape_col = f"{key}__bar_shape"
+            volume_z_col = f"{key}__volume_z_100"
+            rvol_col = f"{key}__realized_vol_30"
+            vol_mean_col = f"{key}__volume_roll_mean_100"
+            vol_std_col = f"{key}__volume_roll_std_100"
+
+            with_cross = with_z.with_columns(
+                [
+                    (
+                        (pl.col(close_col) - pl.col(open_col))
+                        / (pl.col(high_col) - pl.col(low_col) + BAR_SHAPE_EPS)
+                    ).alias(bar_shape_col),
+                    pl.col(volume_col)
+                    .rolling_mean(window_size=VOLUME_ROLLING_WINDOW)
+                    .alias(vol_mean_col),
+                    pl.col(volume_col)
+                    .rolling_std(window_size=VOLUME_ROLLING_WINDOW)
+                    .alias(vol_std_col),
+                    pl.col(log_ret_col)
+                    .rolling_std(window_size=REALIZED_VOL_WINDOW)
+                    .alias(rvol_col),
+                ]
+            )
+            with_cross = with_cross.with_columns(
+                [
+                    (
+                        pl.when(pl.col(vol_std_col) == 0)
+                        .then(None)
+                        .otherwise(
+                            (pl.col(volume_col) - pl.col(vol_mean_col)) / pl.col(vol_std_col)
+                        )
+                    ).alias(volume_z_col),
+                ]
+            )
+            cross_out_cols = [rvol_col, volume_z_col, bar_shape_col]
+            cross_feature_names = list(CROSS_ASSET_FEATURE_SPECS)
+
+            # VIX-only: vix_level (= close) + vix_change (= close - close.shift(1)).
+            symbol_name = key.split("__", 1)[1] if "__" in key else key
+            if symbol_name == "VIX":
+                vix_level_col = f"{key}__vix_level"
+                vix_change_col = f"{key}__vix_change"
+                with_cross = with_cross.with_columns(
+                    [
+                        pl.col(close_col).alias(vix_level_col),
+                        (pl.col(close_col) - pl.col(close_col).shift(1)).alias(vix_change_col),
+                    ]
+                )
+                cross_out_cols = [*cross_out_cols, vix_level_col, vix_change_col]
+                cross_feature_names = cross_feature_names + list(VIX_FEATURE_SPECS)
+
+            out = out.hstack(with_cross.select(cross_out_cols))
+            feature_names = feature_names + cross_feature_names
+            emit_frame = with_cross
+
         grid_ts_values = aligned["grid_ts"].to_list()
         for feature_name in feature_names:
             col_name = f"{key}__{feature_name}"
@@ -285,6 +368,9 @@ def _classify_failure(
             v = df[volume_col].to_list()[row_idx]
             if v is None:
                 return "nan_input"
+    # Sprint 069: VIX-specific vix_change uses close - close.shift(1); row 0 null.
+    if feature_name == "vix_change" and row_idx == 0:
+        return "insufficient_history"
     return "downstream_error"
 
 
@@ -304,11 +390,23 @@ def run_feature_pipeline(
     features.write_parquet(output_path)
 
     channel_columns = _channel_close_columns(aligned)
-    # Sprint 049: target channel emits FEATURE_SPECS + TARGET_FEATURE_SPECS;
-    # non-target channels emit FEATURE_SPECS only.
+
+    # Sprint 049/069: per-channel feature counts.
+    # target = FEATURE_SPECS + TARGET_FEATURE_SPECS.
+    # market_context = FEATURE_SPECS + CROSS_ASSET_FEATURE_SPECS (+ VIX for symbol=VIX).
+    # others = FEATURE_SPECS only.
+    def _per_channel_count(key: str, channel_name: str) -> int:
+        base = len(FEATURE_SPECS)
+        if channel_name == "target":
+            return base + len(TARGET_FEATURE_SPECS)
+        if channel_name == "market_context":
+            symbol_name = key.split("__", 1)[1] if "__" in key else key
+            vix_extra = len(VIX_FEATURE_SPECS) if symbol_name == "VIX" else 0
+            return base + len(CROSS_ASSET_FEATURE_SPECS) + vix_extra
+        return base
+
     per_channel_feature_counts = sum(
-        len(FEATURE_SPECS) + (len(TARGET_FEATURE_SPECS) if channel_name == "target" else 0)
-        for _, (_, channel_name) in channel_columns.items()
+        _per_channel_count(key, channel_name) for key, (_, channel_name) in channel_columns.items()
     )
     n_features_emitted = aligned.height * per_channel_feature_counts - n_failures
 
