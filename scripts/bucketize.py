@@ -23,6 +23,7 @@ from pathlib import Path
 
 from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.git import git_sha
+from price_space_llm.heldout_guard import HeldoutReadRefused, guard_heldout_parquet
 from price_space_llm.script_harness import script_session
 from price_space_llm.tokenizer import run_tokenizer
 from price_space_llm.tokenizer.bucketize import load_bucket_stats, run_tokenizer_pt
@@ -98,7 +99,19 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("artifacts/tokenizer/normalizers.pt"),
         help="Frozen normalizer destination (versioned via write_versioned).",
     )
+    parser.add_argument(
+        "--allow-test-look",
+        action="store_true",
+        help="Sprint 065: acknowledge reading a held-out features parquet.",
+    )
     args = parser.parse_args(argv)
+
+    # Sprint 065: refuse to tokenize a held-out features parquet without ack.
+    try:
+        guard_heldout_parquet(args.features, allow_test_look=args.allow_test_look)
+    except HeldoutReadRefused as ex:
+        print(f"tokenize: {ex}", file=sys.stderr)
+        return 2
 
     if not args.features.exists():
         print(f"tokenize: features parquet not found: {args.features}", file=sys.stderr)

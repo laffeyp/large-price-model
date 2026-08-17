@@ -18,6 +18,7 @@ from pathlib import Path
 from price_space_llm.config import ConfigValidationFailed, load_config
 from price_space_llm.features import run_feature_pipeline
 from price_space_llm.git import git_sha
+from price_space_llm.heldout_guard import HeldoutReadRefused, guard_heldout_parquet
 from price_space_llm.script_harness import script_session
 
 
@@ -38,7 +39,20 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("configs/experiment/v1.json"),
         help="ExperimentConfig JSON. Validated by pydantic; CONFIG_RESOLVED fires on success.",
     )
+    parser.add_argument(
+        "--allow-test-look",
+        action="store_true",
+        help="Sprint 065: acknowledge reading a held-out aligned parquet. "
+        "Register the look via scripts/register_test_look.py first.",
+    )
     args = parser.parse_args(argv)
+
+    # Sprint 065: refuse to read a held-out aligned parquet without acknowledgment.
+    try:
+        guard_heldout_parquet(args.aligned, allow_test_look=args.allow_test_look)
+    except HeldoutReadRefused as ex:
+        print(f"features: {ex}", file=sys.stderr)
+        return 2
 
     if not args.aligned.exists():
         print(f"features: aligned parquet not found: {args.aligned}", file=sys.stderr)

@@ -42,10 +42,7 @@ def _matches_config_path(path: Path, globs: tuple[str, ...]) -> bool:
     require: `data/manifests/**/*.json` should match a file directly under
     `data/manifests/`.
     """
-    for glob in globs:
-        if path.full_match(glob):
-            return True
-    return False
+    return any(path.full_match(glob) for glob in globs)  # type: ignore[attr-defined]
 
 
 def _find_heldout_dates(text: str) -> list[str]:
