@@ -207,3 +207,76 @@ def test_metric_snapshot_json_carries_deterministic_hash(tmp_path: Path):
         return str(snap.payload["sha256"])
 
     assert _run() == _run()
+
+
+# Sprint 067: regime evaluator VIX switch ---------------------------------
+
+
+def test_load_features_prefers_vix_when_column_present(tmp_path: Path):
+    """Sprint 067: _load_features_and_tokens prefers market_context__VIX__close."""
+    import polars as pl
+
+    from price_space_llm.evaluation.evaluate import _load_features_and_tokens
+
+    features = pl.DataFrame(
+        {
+            "grid_ts": [1, 2, 3],
+            "target__SPY__rolling_std_20": [0.5, 0.6, 0.7],
+            "market_context__VIX__close": [14.0, 15.0, 22.0],
+        }
+    )
+    tokens = pl.DataFrame(
+        {
+            "grid_ts": [1, 2, 3],
+            "target__SPY__bucket_id": [0, 1, 2],
+        }
+    )
+    fpath = tmp_path / "features.parquet"
+    tpath = tmp_path / "tokens.parquet"
+    features.write_parquet(fpath)
+    tokens.write_parquet(tpath)
+    _, _, vols = _load_features_and_tokens(fpath, tpath, "SPY")
+    # VIX values, not rolling_std_20.
+    assert vols == [14.0, 15.0, 22.0]
+
+
+def test_load_features_falls_back_to_rolling_std_when_no_vix(tmp_path: Path):
+    """Sprint 067 back-compat: pre-Sprint-038 features parquets still evaluate."""
+    import polars as pl
+
+    from price_space_llm.evaluation.evaluate import _load_features_and_tokens
+
+    features = pl.DataFrame(
+        {
+            "grid_ts": [1, 2, 3],
+            "target__SPY__rolling_std_20": [0.5, 0.6, 0.7],
+        }
+    )
+    tokens = pl.DataFrame(
+        {
+            "grid_ts": [1, 2, 3],
+            "target__SPY__bucket_id": [0, 1, 2],
+        }
+    )
+    fpath = tmp_path / "features.parquet"
+    tpath = tmp_path / "tokens.parquet"
+    features.write_parquet(fpath)
+    tokens.write_parquet(tpath)
+    _, _, vols = _load_features_and_tokens(fpath, tpath, "SPY")
+    assert vols == [0.5, 0.6, 0.7]
+
+
+def test_load_features_raises_when_no_vol_column(tmp_path: Path):
+    import polars as pl
+    import pytest
+
+    from price_space_llm.evaluation.evaluate import _load_features_and_tokens
+
+    features = pl.DataFrame({"grid_ts": [1, 2, 3]})
+    tokens = pl.DataFrame({"grid_ts": [1, 2, 3], "target__SPY__bucket_id": [0, 1, 2]})
+    fpath = tmp_path / "features.parquet"
+    tpath = tmp_path / "tokens.parquet"
+    features.write_parquet(fpath)
+    tokens.write_parquet(tpath)
+    with pytest.raises(ValueError, match="lacks both"):
+        _load_features_and_tokens(fpath, tpath, "SPY")

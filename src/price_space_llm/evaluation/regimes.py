@@ -2,12 +2,12 @@
 
 The v0.3 vocabulary describes RegimeLabel as "a VIX tercile tag (low /
 mid / high) attached to a held-out bar, computed on the training window
-and frozen." Sprint 032 substitutes VIX with `target__SPY__rolling_std_20`
-because Sprint 023's probe dropped VIX (Alpha-Vantage refused
-TIME_SERIES_INTRADAY on ^VIX). The vocabulary carries no field for
-"which proxy" -- the substitution lives in this module docstring, the
-Sprint 032 card, and the drift-watchlist. A real-VIX rerun replaces
-the proxy when Databento (or similar) lands intraday VIX.
+and frozen." Sprint 032 substituted VIX with `target__SPY__rolling_std_20`
+because Sprint 023's probe dropped VIX. Sprint 038 landed real VIX via
+`INDEX_DATA` (daily). Sprint 067 flips the evaluator to consume
+`market_context__VIX__close` when available; it falls back to the
+rolling-std proxy on old features parquets so pre-Sprint-067 checkpoints
+still evaluate.
 """
 
 from dataclasses import dataclass

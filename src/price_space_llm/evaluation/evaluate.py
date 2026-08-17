@@ -97,20 +97,36 @@ def _forward_all_in_batches(
     return torch.cat(all_probs, dim=0) if all_probs else torch.zeros((0,))
 
 
+VIX_LEVEL_COL = "market_context__VIX__close"
+
+
 def _load_features_and_tokens(
     features_path: Path,
     tokens_path: Path,
     target_symbol: str,
 ) -> tuple[pl.DataFrame, list[int], list[float | None]]:
-    """Return (aligned features frame, tokens list, per-token rolling-vol list)."""
+    """Return (aligned features frame, tokens list, per-token volatility list).
+
+    Sprint 067: volatility source is `market_context__VIX__close` when present
+    (spec's tercile-on-VIX intent, unblocked by Sprint 038's real VIX daily
+    close). Falls back to `target__{sym}__rolling_std_20` on features parquets
+    that predate Sprint 038 so old training runs remain reproducible.
+    """
     features = pl.read_parquet(features_path)
     tokens_df = pl.read_parquet(tokens_path)
     token_col = f"target__{target_symbol}__bucket_id"
-    vol_col = f"target__{target_symbol}__rolling_std_20"
     if token_col not in tokens_df.columns:
         raise ValueError(f"tokens parquet lacks {token_col!r}")
-    if vol_col not in features.columns:
-        raise ValueError(f"features parquet lacks {vol_col!r}")
+
+    # Prefer real VIX close; fall back to per-target rolling std as a sanity substitute.
+    if VIX_LEVEL_COL in features.columns:
+        vol_col = VIX_LEVEL_COL
+    else:
+        vol_col = f"target__{target_symbol}__rolling_std_20"
+        if vol_col not in features.columns:
+            raise ValueError(
+                f"features parquet lacks both {VIX_LEVEL_COL!r} and {vol_col!r}"
+            )
 
     joined = tokens_df.join(features.select(["grid_ts", vol_col]), on="grid_ts", how="left")
     joined = joined.filter(pl.col(token_col).is_not_null())
