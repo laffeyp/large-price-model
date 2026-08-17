@@ -541,6 +541,14 @@ def run_tokenizer_pt(
         "channel_coverage_sha": channel_coverage_sha,
     }
 
+    # Sprint 062: session flags computed from grid_ts. Adds `session__flags`
+    # channel (Tensor[T, 4]) + populates the `is_overnight_gap` field the
+    # Sprint 052 payload previously left as None.
+    from price_space_llm.tokenizer.session import compute_session_features
+
+    session_feats, is_overnight_gap = compute_session_features(timestamps_t)
+    features_dict["session__flags"] = session_feats
+
     # Sprint 054: apply frozen normalizer (if supplied) before persisting.
     if normalizer is not None:
         from price_space_llm.normalizer import apply_frozen_normalizer
@@ -555,7 +563,7 @@ def run_tokenizer_pt(
             "targets": targets_t,
             "vol": vol_t,
             "timestamps": timestamps_t,
-            "is_overnight_gap": None,  # Sprint 055 placeholder
+            "is_overnight_gap": is_overnight_gap,  # Sprint 062: populated from grid_ts
             "mask": mask_t,
             "channel_names": tuple(sorted(features_dict.keys())),
             "meta": meta,

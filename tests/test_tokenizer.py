@@ -5,6 +5,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+import torch
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -578,3 +579,96 @@ def test_write_load_roundtrip_preserves_per_bucket(tmp_path: Path):
             assert math.isnan(load_row.train_mean)
         else:
             assert abs(orig_row.train_mean - load_row.train_mean) < 1e-9
+
+
+# Sprint 062: session flags ------------------------------------------------
+
+
+def test_session_features_shape_and_columns():
+    """Sprint 062: shape [T, 4]; is_overnight_gap [T]."""
+    from price_space_llm.tokenizer.session import compute_session_features
+
+    # 4 bars, 15 min apart.
+    ts = torch.tensor(
+        [0, 15 * 60, 30 * 60, 45 * 60],
+        dtype=torch.int64,
+    )
+    feats, gap = compute_session_features(ts)
+    assert feats.shape == (4, 4)
+    assert gap.shape == (4,)
+    # sin/cos should be in [-1, 1].
+    assert (feats >= -1).all()
+    assert (feats <= 1).all()
+
+
+def test_session_features_detects_overnight_gap():
+    """Sprint 062: gap > 15 min → is_overnight_gap=1 on that bar."""
+    from price_space_llm.tokenizer.session import compute_session_features
+
+    # Two bars 15 min apart, then a big gap (overnight = ~17 hours), then two more.
+    ts = torch.tensor(
+        [
+            0,
+            15 * 60,
+            15 * 60 + 17 * 3600,
+            15 * 60 + 17 * 3600 + 15 * 60,
+        ],
+        dtype=torch.int64,
+    )
+    _, gap = compute_session_features(ts)
+    # Bar 0 = session start; bar 1 same day; bar 2 next day; bar 3 same day.
+    assert list(gap.tolist()) == [1, 0, 1, 0]
+
+
+def test_session_features_cyclic_encoding_of_time():
+    """Sprint 062: minute-of-day sin+cos at midnight = (0, 1); at noon = (0, -1)."""
+    from price_space_llm.tokenizer.session import compute_session_features
+
+    midnight = 0
+    noon = 12 * 3600
+    ts = torch.tensor([midnight, noon], dtype=torch.int64)
+    feats, _ = compute_session_features(ts)
+    assert abs(float(feats[0, 0]) - 0.0) < 1e-6  # sin(0) = 0
+    assert abs(float(feats[0, 1]) - 1.0) < 1e-6  # cos(0) = 1
+    assert abs(float(feats[1, 0]) - 0.0) < 1e-5  # sin(π) = 0
+    assert abs(float(feats[1, 1]) - (-1.0)) < 1e-6  # cos(π) = -1
+
+
+def test_session_features_empty_timestamps():
+    from price_space_llm.tokenizer.session import compute_session_features
+
+    ts = torch.zeros(0, dtype=torch.int64)
+    feats, gap = compute_session_features(ts)
+    assert feats.shape == (0, 4)
+    assert gap.shape == (0,)
+
+
+def test_run_tokenizer_pt_adds_session_channel_and_gap_tensor(tmp_path: Path):
+    """Sprint 062: run_tokenizer_pt writes session__flags channel + populated
+    is_overnight_gap (not None)."""
+    import torch
+
+    features = _multichannel_features(n_rows=200)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 12, 31),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="session-smoke",
+    )
+    payload = torch.load(output, weights_only=False)
+    assert "session__flags" in payload["features"]
+    assert payload["features"]["session__flags"].shape == (200, 4)
+    assert payload["is_overnight_gap"] is not None
+    assert payload["is_overnight_gap"].shape == (200,)
