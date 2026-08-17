@@ -369,3 +369,109 @@ def test_run_training_feats_completes_two_step_smoke(tmp_path: Path):
     )
     assert result.final_step == 2
     assert result.n_parameters > 0
+
+
+# zero_non_target_features (Sprint 061) -----------------------------------
+
+
+def test_zero_non_target_features_zeros_non_target_channels():
+    """Sprint 061: target_only ablation — non-target channels become zeros."""
+    from price_space_llm.model import zero_non_target_features
+
+    n = 10
+    torch.manual_seed(0)
+    artifact = TokenizedArtifact(
+        features={
+            "target__SPY": torch.randn(n, 4),
+            "market_context__VIX": torch.randn(n, 3),
+            "macro__CPI": torch.randn(n, 4),
+        },
+        targets=torch.randint(0, 32, (n,), dtype=torch.int64),
+        vol=torch.zeros(n),
+        timestamps=torch.arange(n, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.ones(n, dtype=torch.bool),
+        channel_names=("macro__CPI", "market_context__VIX", "target__SPY"),
+        meta={"run_id": "test"},
+    )
+    zeroed = zero_non_target_features(artifact, target_symbol="SPY")
+    # Target unchanged.
+    assert torch.equal(zeroed.features["target__SPY"], artifact.features["target__SPY"])
+    # Non-target zeroed, shape preserved.
+    assert zeroed.features["market_context__VIX"].shape == (n, 3)
+    assert torch.allclose(zeroed.features["market_context__VIX"], torch.zeros(n, 3))
+    assert zeroed.features["macro__CPI"].shape == (n, 4)
+    assert torch.allclose(zeroed.features["macro__CPI"], torch.zeros(n, 4))
+    # Non-feature fields pass through.
+    assert torch.equal(zeroed.targets, artifact.targets)
+    assert zeroed.channel_names == artifact.channel_names
+
+
+def test_zero_non_target_features_rejects_missing_target():
+    """Refuse if the artifact has no target channel for the given symbol."""
+    from price_space_llm.model import zero_non_target_features
+
+    n = 5
+    artifact = TokenizedArtifact(
+        features={"market_context__VIX": torch.zeros(n, 3)},
+        targets=torch.zeros(n, dtype=torch.int64),
+        vol=torch.zeros(n),
+        timestamps=torch.arange(n, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.ones(n, dtype=torch.bool),
+        channel_names=("market_context__VIX",),
+        meta={},
+    )
+    with pytest.raises(ValueError, match="target key 'target__SPY' not in artifact"):
+        zero_non_target_features(artifact, target_symbol="SPY")
+
+
+def test_zero_non_target_features_composes_with_run_training_feats(tmp_path: Path):
+    """Sprint 061: the zeroed artifact drops cleanly through the trainer."""
+    from price_space_llm.model import (
+        MarketStateTransformerConfig,
+        run_training_feats,
+        zero_non_target_features,
+    )
+    from price_space_llm.model.trainer import TrainerConfig
+    from price_space_llm.signals import StrictSignalEmitter, load_vocabulary
+
+    n = 500
+    torch.manual_seed(0)
+    artifact = TokenizedArtifact(
+        features={
+            "target__SPY": torch.randn(n, 4),
+            "market_context__VIX": torch.randn(n, 3),
+        },
+        targets=torch.randint(0, 32, (n,), dtype=torch.int64),
+        vol=torch.zeros(n),
+        timestamps=torch.arange(n, dtype=torch.int64),
+        is_overnight_gap=None,
+        mask=torch.ones(n, dtype=torch.bool),
+        channel_names=("market_context__VIX", "target__SPY"),
+        meta={},
+    )
+    zeroed = zero_non_target_features(artifact, target_symbol="SPY")
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=64,
+        channel_dims={"target__SPY": 4, "market_context__VIX": 3},
+    )
+    tcfg = TrainerConfig(
+        n_steps=2,
+        batch_size=2,
+        lr=3e-4,
+        eval_every=2,
+        seed=0,
+        warmup_steps=1,
+        deterministic=False,
+    )
+    result = run_training_feats(
+        artifact=zeroed,
+        trainer_cfg=tcfg,
+        model_cfg=cfg,
+        emitter=StrictSignalEmitter(load_vocabulary(), max_buffer=8192),
+        run_id="zeroed-smoke",
+        checkpoint_dir=tmp_path / "ckpts",
+    )
+    assert result.final_step == 2

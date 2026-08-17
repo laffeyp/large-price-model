@@ -200,6 +200,45 @@ class WindowSamplerFeats:
         return self._max_start + 1
 
 
+def zero_non_target_features(artifact: TokenizedArtifact, target_symbol: str) -> TokenizedArtifact:
+    """Sprint 061: return a new TokenizedArtifact with every non-target channel's
+    feature tensor replaced by zeros of the same shape.
+
+    Product-spec § Baselines target-only ablation: *"same architecture as the
+    default transformer, every non-target channel zeroed at the embedder — the
+    whole thesis rides on this comparison."* The zeroed model can still consume
+    the target features; the ablation isolates whether the extra channels are
+    doing real work.
+
+    `target_symbol` matches the channel key suffix, e.g. `target__SPY` when
+    `target_symbol == "SPY"`. Target channel's tensor is copied through
+    unchanged. targets, vol, timestamps, is_overnight_gap, mask, channel_names,
+    meta all pass through unchanged.
+    """
+    target_key = f"target__{target_symbol}"
+    if target_key not in artifact.features:
+        raise ValueError(
+            f"target key {target_key!r} not in artifact.features; "
+            f"got keys={sorted(artifact.features.keys())}"
+        )
+    new_features: dict[str, Tensor] = {}
+    for key, tensor in artifact.features.items():
+        if key == target_key:
+            new_features[key] = tensor
+        else:
+            new_features[key] = torch.zeros_like(tensor)
+    return TokenizedArtifact(
+        features=new_features,
+        targets=artifact.targets,
+        vol=artifact.vol,
+        timestamps=artifact.timestamps,
+        is_overnight_gap=artifact.is_overnight_gap,
+        mask=artifact.mask,
+        channel_names=artifact.channel_names,
+        meta=artifact.meta,
+    )
+
+
 def load_tokens_pt(path: Path) -> TokenizedArtifact:
     """Read a Sprint 052 tokenized `.pt` artifact and return the typed dataclass.
 

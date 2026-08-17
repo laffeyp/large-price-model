@@ -22,6 +22,7 @@ from price_space_llm.model.dataset import (
     WindowSamplerFeats,
     load_tokens,
     load_tokens_pt,
+    zero_non_target_features,
 )
 from price_space_llm.model.trainer import (
     TrainerResult,
@@ -51,4 +52,5 @@ __all__ = [
     "load_tokens_pt",
     "run_training",
     "run_training_feats",
+    "zero_non_target_features",
 ]
