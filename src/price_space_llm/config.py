@@ -66,6 +66,13 @@ def load_config(
     emitter: StrictSignalEmitter,
     run_id: str,
     git_sha: str,
+    *,
+    d_model: int = 64,
+    n_layers: int = 4,
+    n_heads: int = 4,
+    fusion: str = "sum",
+    mixer_dim: int = 96,
+    mixer_n_heads: int = 2,
 ) -> ConfigResolutionResult:
     """Load, validate, and emit CONFIG_RESOLVED (or CONFIG_VALIDATION_FAILED and raise).
 
@@ -122,6 +129,13 @@ def load_config(
         # keeps parse-time integrity, and we cast at emit for the enum check.
         context_len=str(config.context_len),
         n_buckets=str(config.n_buckets),
+        # Sprint 084 (v0.7): model architecture fields make the trace self-describing.
+        d_model=str(d_model),
+        n_layers=str(n_layers),
+        n_heads=str(n_heads),
+        fusion=fusion,
+        mixer_dim=mixer_dim,
+        mixer_n_heads=mixer_n_heads,
     )
 
     return ConfigResolutionResult(
@@ -131,9 +145,99 @@ def load_config(
     )
 
 
+# Sprint 073: model-size configs (Phase E, roadmap 067) ---------------------
+#
+# Spec (plans/v1-roadmap.md § 1): four pre-registered sizes
+#   xs: d_model=128, n_layers=4, n_heads=2   (~1M params)
+#   sm: d_model=192, n_layers=6, n_heads=3   (~3M)
+#   md: d_model=384, n_layers=8, n_heads=6   (~10M)
+#   lg: d_model=512, n_layers=8, n_heads=8   (~30M)
+#
+# Every canonical shape has head_dim = d_model / n_heads = 64. The Literal
+# enums below reject any off-spec value at parse time; a sweep script that
+# hand-authors a fifth shape must edit the vocabulary here first.
+
+
+class ModelSizeConfig(BaseModel):
+    """Pre-registered transformer shape. Fields match `TransformerConfig`
+    and `MarketStateTransformerConfig` one-for-one so the CLI can splat.
+    """
+
+    d_model: Literal[128, 192, 384, 512] = Field(..., description="Model width.")
+    n_layers: Literal[4, 6, 8] = Field(..., description="Transformer blocks.")
+    n_heads: Literal[2, 3, 6, 8] = Field(..., description="Attention heads (d_model/64).")
+
+
+class ModelSizeConfigValidationFailed(RuntimeError):
+    """Model-size config file exists but does not satisfy the schema."""
+
+
+def load_model_size_config(path: Path) -> ModelSizeConfig:
+    """Load and validate a model-size JSON config from disk.
+
+    Emits nothing — the caller passes the resolved shape into the model
+    constructor and `SESSION_INIT` / `CONFIG_RESOLVED` fire from there.
+    A v0.6 vocabulary bump adds d_model / n_layers / n_heads to
+    `CONFIG_RESOLVED.typed_payload`; that bump is its own sprint.
+    """
+    if not path.exists():
+        raise ModelSizeConfigValidationFailed(f"model-size config not found: {path}")
+    try:
+        raw = json.loads(path.read_bytes())
+    except json.JSONDecodeError as ex:
+        raise ModelSizeConfigValidationFailed(f"JSON parse error in {path}: {ex}") from ex
+    try:
+        return ModelSizeConfig.model_validate(raw)
+    except ValidationError as ex:
+        raise ModelSizeConfigValidationFailed(str(ex)) from ex
+
+
+# Sprint 074: context-length configs (Phase E, roadmap 068) ----------------
+#
+# Spec (plans/v1-roadmap.md § 1): four pre-registered context lengths
+#   64, 128, 256, 512.  Sibling to `ModelSizeConfig`; same Literal-at-the-edge
+#   discipline. `ExperimentConfig.context_len` already carries the same set,
+#   so a `--context-config` overlay strictly narrows to a value the trainer
+#   already accepts.
+
+
+class ContextLenConfig(BaseModel):
+    """Pre-registered transformer context length. Overlays onto
+    `ExperimentConfig.context_len` in the training CLI.
+    """
+
+    context_len: Literal[64, 128, 256, 512] = Field(
+        ..., description="Sampled window length in bars."
+    )
+
+
+class ContextLenConfigValidationFailed(RuntimeError):
+    """Context-length config file exists but does not satisfy the schema."""
+
+
+def load_context_len_config(path: Path) -> ContextLenConfig:
+    """Load and validate a context-length JSON config from disk."""
+    if not path.exists():
+        raise ContextLenConfigValidationFailed(f"context-length config not found: {path}")
+    try:
+        raw = json.loads(path.read_bytes())
+    except json.JSONDecodeError as ex:
+        raise ContextLenConfigValidationFailed(f"JSON parse error in {path}: {ex}") from ex
+    try:
+        return ContextLenConfig.model_validate(raw)
+    except ValidationError as ex:
+        raise ContextLenConfigValidationFailed(str(ex)) from ex
+
+
 __all__ = [
     "ConfigResolutionResult",
     "ConfigValidationFailed",
+    "ContextLenConfig",
+    "ContextLenConfigValidationFailed",
     "ExperimentConfig",
+    "ModelSizeConfig",
+    "ModelSizeConfigValidationFailed",
     "load_config",
+    "load_context_len_config",
+    "load_model_size_config",
 ]

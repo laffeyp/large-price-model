@@ -21,6 +21,12 @@ from price_space_llm.cost_calibration.calibrate import (
     CostCalibrationResult,
     run_cost_calibration,
 )
+from price_space_llm.cost_calibration.corwin_schultz import (
+    BiasCorrection,
+    apply_bias_correction,
+    corwin_schultz_spread,
+    fit_bias_correction,
+)
 from price_space_llm.cost_calibration.kappa import (
     KappaFit,
     fit_kappa,
@@ -37,11 +43,15 @@ from price_space_llm.cost_calibration.spread import (
 __all__ = [
     "AtmSpread",
     "BboSnapshot",
+    "BiasCorrection",
     "CostCalibrationResult",
     "KappaFit",
     "SpreadScalerFit",
+    "apply_bias_correction",
+    "corwin_schultz_spread",
     "extract_atm_spread",
     "extract_bbo_snapshot",
+    "fit_bias_correction",
     "fit_kappa",
     "fit_spread_scaler",
     "run_cost_calibration",

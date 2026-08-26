@@ -6,6 +6,65 @@
 
 ---
 
+## Errata (added 2026-08-17, Sprint 077)
+
+**The sprint numbers in the tables below no longer match the real sprint log.** Roadmap slots 042-090 were speculative when written; real work absorbed extra sprints (a review-driven fixes sprint 041, a VXX-for-VIX-volume substitution 050, an evaluator VIX-regime switch 067, an evaluator market-state path 068, a mask-semantics fix 075, a std-clamp tightening 076, and this fail-loud loads sprint 077 — none of which the roadmap anticipated). Consult `BLACKBOARD.md ## Built` for the authoritative history.
+
+Real-sprint mapping for every roadmap item shipped as of Sprint 077:
+
+| Roadmap item | Real sprint(s) | Notes |
+|---|---|---|
+| 042 aligned parquet enrichment | 042 | match |
+| 043 zoneinfo DST | 043 | match |
+| 044 cross-asset intraday (6 channels; DXY) | 044 | DXY substituted with UUP (2026-08-14 Architect Decision); VXX added Sprint 050 for VIX volume |
+| 045 macro (5 series) | 045 | match |
+| 046 options (PCR + VOL) | 046 (PCR) + 047 (VOL) | split |
+| 047 event tables | 048 | slipped +1 |
+| 048 target features | 049 | slipped +1 |
+| 049 cross-asset features | 069 | slipped +20 |
+| 050 macro features (deltas + days-since; `countdown_to_next` deferred) | 070 | `countdown_to_next` still deferred |
+| 051 options features (z-score only, no staleness pair; review-verify errata) | 071 | actual: `z_score_20d` |
+| 052 event features (release_flag + mins_to_next_release; review-verify errata) | 072 | actual: `("release_flag", "mins_to_next_release")` |
+| 053 session flags | 062 | shipped early |
+| 054 frozen normalizer | 054 | match |
+| 055 v0.4 vocab NORMALIZER_DRIFT_MEASURED | 055 as v0.5 | v0.4 was consumed by the hosted-tracker retraction; drift tag landed in v0.5 |
+| 056 extended `bucket_stats.json` | 056 | match |
+| 057 extended tokenized artifact | 052 | shipped early |
+| 058 MarketStateEmbedder | 053 | shipped early |
+| 059 RoPE | deferred | 2026-08-16 Architect Decision ratifies deferral past pre-GPU work |
+| 060 AdamW + cosine + warmup + bf16 + deterministic | 057 | shipped early, bundled |
+| 061 purged embargo | 058 | shipped bundled with top-K |
+| 062 top-K checkpoint | 058 | shipped bundled with embargo |
+| 063 device handling | 051 | shipped early |
+| 064 MLP baseline | 059 | slipped +5 by ordering |
+| 065 GRU baseline | 060 | slipped +5 |
+| 066 target-only zeroed transformer | 061 | slipped +5 |
+| 067 config-driven model sizes | 073 | slipped +6 |
+| 068 config-driven context lengths | 074 | slipped +6; landed at `configs/context/{N}.json` not `configs/experiments/{context_N}.json` |
+| 069 channel-aware fusion | pending | Phase E follow-up |
+| 070 patch=4 embedder | pending | Phase E follow-up |
+| 071 quantile head | pending | Phase E follow-up |
+| 072 bucket-count variants | pending | Phase E follow-up |
+| 073-078 Phase F: cost calibration + simulator | pending | full-window cost recalibration + simulator + capacity + kappa sensitivity |
+| 079 experiments/logbook.csv writer | 063 | shipped bundled with hooks work |
+| 080 check_test_look.sh pre-commit hook | 064 | match on function, slipped on number |
+| 081 test-look runtime wiring | 051 | shipped early with device handling |
+| 082 spec-invariant guard tests | 066 | slipped |
+| 083 rented GPU provision | pending | Phase H opens |
+| 084 model-size sweep | pending | 4-point sweep at rented A10 / A100 |
+| 085 context-length sweep | pending | at winning size |
+| 086 baseline ladder | pending | 5-run ladder |
+| 087 architecture ablations | pending | 4-6 runs |
+| 088 first held-out evaluation | pending | test-look budget draw |
+| 089 v1 report | pending | pass/fail against every spec gate |
+| 090 project close | pending | KIT_DIARY final synthesis |
+
+**Real sprints not on the roadmap:** 041 (pre-GPU review-driven fixes), 050 (VXX ingest), 067 (regime evaluator VIX switch), 068 (evaluator MarketStateTransformer path), 075 (mask redefinition), 076 (std_clamp configurability + warn helper), 077 (fail-loud loads + this errata).
+
+The body of the roadmap below is preserved verbatim for the audit trail. A phase-plan sprint that rewrites the numbering to match the sprint log lands separately if the Architect calls it.
+
+---
+
 ## 1. What v1 requires
 
 Spec §v1 pins one target (SPY), 15-minute bars, 2015-01-01 through 2022-12-31 training, 2023 validation, 2024-01-01 through 2025-06-30 held-out. The deliverable is a report on all sweep + ablation curves, plus a held-out Sharpe with confidence, plus a capacity number, all consumed against pre-registered gates.
@@ -289,6 +348,6 @@ Total: 48 sprints from Sprint 042 through Sprint 090 (some parallelizable within
 
 - **GPU rental.** Decided 2026-08-13: AWS. Sprint 083 rents an EC2 GPU instance (g5.xlarge for A10 dev at ~$1/hr; p4d.24xlarge or similar for A100 production sweep points).
 - **Run tracking.** Resolved 2026-08-13: local files only. The SDD JSONL trace at `logs/{run_id}/signals.jsonl` is the authoritative log. `scripts/plot_run.py` reads the trace and writes loss curves + metric tables to `artifacts/{run_id}/` as PNG. No hosted tracker, no third-party account, no credential.
-- **Historical SPY spread data for cost calibration** (Sprint 073). The simulator's cost model subtracts a transaction cost from every simulated trade. That cost is half of the spread between the buy price and sell price on SPY at the trade instant. Sprint 035 pulled today's live spread from Alpha-Vantage for 3 months of 2024 and fit a scaler. To recalibrate against the full 2015-2022 training window, we need historical spread data from that period. Alpha-Vantage does not sell it. Three paths: (a) buy 8 years of SPY historical BBO from Databento (~$100-500), (b) drop ground-truth calibration and estimate spread from bar high/low ranges only via the Corwin-Schultz formula the spec names as a fallback, (c) apply Sprint 035's 2024 coefficient to the training window and assume spread dynamics did not shift across 8 years. Path (a) is the honest one; path (c) is the fastest and weakest.
+- **Historical SPY spread data for cost calibration** — RESOLVED 2026-08-17 by Architect: path (b) Corwin-Schultz OHL proxy + 2024 bias correction. Path (a) Databento revisit reserved after Sprint 084 sweep + Sprint 088 held-out evaluation reveal whether the Sharpe-gate margin needs ground-truth resolution. Sprint 091 opens as the full-window CS refit; simulator sprints (Sprints 092-096, roadmap 074-078) queue behind it. See `BLACKBOARD.md ## Decisions` 2026-08-17 entry for the full ratification.
 
 **Revision policy.** Each sprint closes with its normal card + BLACKBOARD entry. If a sprint surfaces a new gap not in this plan, the plan gets amended in the same commit that files the gap. This document tracks the whole build; sprint cards track each build step.

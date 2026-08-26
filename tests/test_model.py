@@ -16,9 +16,13 @@ from price_space_llm.model.dataset import (
     split_tokens,
 )
 from price_space_llm.model.transformer import (
+    N_QUANTILES,
+    QUANTILE_LEVELS,
+    ChannelMixerEmbedder,
     MarketStateEmbedder,
     MarketStateTransformer,
     MarketStateTransformerConfig,
+    PatchEmbedder,
     PriceSpaceLLM,
     TransformerConfig,
 )
@@ -174,7 +178,14 @@ def _write_pt(tmp_path: Path, payload: dict) -> Path:
     return p
 
 
-def _sample_payload(n_rows: int = 8) -> dict:
+def _sample_payload(n_rows: int = 8, *, mask_semantics: str | None = "target_valid_v075") -> dict:
+    """Build a Sprint-052-shape payload. `mask_semantics` defaults to the
+    Sprint-075 marker so `load_tokens_pt` accepts it under Sprint 077's
+    fail-loud policy; pass `None` to build a legacy payload for the
+    LegacyMaskSemanticRefused branch tests."""
+    meta: dict = {"run_id": "test", "target_symbol": "SPY"}
+    if mask_semantics is not None:
+        meta["mask_semantics"] = mask_semantics
     return {
         "features": {
             "target__SPY": torch.zeros((n_rows, 4), dtype=torch.float32),
@@ -186,7 +197,7 @@ def _sample_payload(n_rows: int = 8) -> dict:
         "is_overnight_gap": None,
         "mask": torch.ones(n_rows, dtype=torch.bool),
         "channel_names": ("market_context__QQQ", "target__SPY"),
-        "meta": {"run_id": "test", "target_symbol": "SPY"},
+        "meta": meta,
     }
 
 
@@ -220,6 +231,55 @@ def test_load_tokens_pt_preserves_feature_shapes(tmp_path: Path):
     artifact = load_tokens_pt(path)
     assert artifact.features["target__SPY"].shape == (8, 4)
     assert float(artifact.features["target__SPY"][3, 2]) == 3 * 4 + 2
+
+
+# Sprint 077: fail-loud on legacy mask semantics ---------------------------
+
+
+def test_load_tokens_pt_refuses_legacy_mask(tmp_path: Path):
+    """Pre-Sprint-075 payload (no `mask_semantics` marker) raises."""
+    from price_space_llm.model.dataset import LegacyMaskSemanticRefused
+
+    legacy = _sample_payload(n_rows=8, mask_semantics=None)
+    path = _write_pt(tmp_path, legacy)
+    with pytest.raises(LegacyMaskSemanticRefused, match="mask_semantics"):
+        load_tokens_pt(path)
+
+
+# Sprint 088: raw_targets field on load ------------------------------------
+
+
+def test_load_tokens_pt_reads_raw_targets(tmp_path: Path):
+    """load_tokens_pt returns raw_targets when present in the payload."""
+    payload = _sample_payload(n_rows=8)
+    payload["raw_targets"] = torch.tensor(
+        [0.1, 0.2, float("nan"), 0.4, 0.5, 0.6, 0.7, 0.8], dtype=torch.float32
+    )
+    path = _write_pt(tmp_path, payload)
+    artifact = load_tokens_pt(path)
+    assert artifact.raw_targets is not None
+    assert artifact.raw_targets.dtype == torch.float32
+    assert torch.isnan(artifact.raw_targets[2])
+    assert float(artifact.raw_targets[3]) == pytest.approx(0.4)
+
+
+def test_load_tokens_pt_pre_sprint_088_artifact_returns_none(tmp_path: Path):
+    """Pre-Sprint-088 payload without raw_targets loads with raw_targets=None."""
+    payload = _sample_payload(n_rows=8)
+    # Explicitly no raw_targets key on this synthetic (pre-Sprint-088 shape).
+    assert "raw_targets" not in payload
+    path = _write_pt(tmp_path, payload)
+    artifact = load_tokens_pt(path)
+    assert artifact.raw_targets is None
+
+
+def test_load_tokens_pt_accepts_legacy_with_flag(tmp_path: Path):
+    """`allow_legacy_mask=True` bypasses the refusal for acknowledged legacy reads."""
+    legacy = _sample_payload(n_rows=8, mask_semantics=None)
+    path = _write_pt(tmp_path, legacy)
+    artifact = load_tokens_pt(path, allow_legacy_mask=True)
+    assert isinstance(artifact, TokenizedArtifact)
+    assert "mask_semantics" not in artifact.meta
 
 
 # MarketStateEmbedder (Sprint 053) ----------------------------------------
@@ -278,6 +338,215 @@ def test_market_state_transformer_forward_shape():
     assert logits.shape == (2, 16, 32)
 
 
+# Sprint 083: ChannelMixerEmbedder -----------------------------------------
+
+
+def test_channel_mixer_embedder_output_shape():
+    """ChannelMixerEmbedder(feats) returns Tensor[B, T, d_model]."""
+    channel_dims = {"target__SPY": 10, "market_context__VIX": 4}
+    emb = ChannelMixerEmbedder(channel_dims, d_model=64, mixer_dim=96, n_heads=2)
+    feats = {
+        "target__SPY": torch.randn(3, 8, 10),
+        "market_context__VIX": torch.randn(3, 8, 4),
+    }
+    out = emb(feats)
+    assert out.shape == (3, 8, 64)
+
+
+def test_channel_mixer_embedder_rejects_extra_channels():
+    """Train-time drift is loud, matching MarketStateEmbedder discipline."""
+    emb = ChannelMixerEmbedder({"a": 3}, d_model=4, mixer_dim=32, n_heads=2)
+    with pytest.raises(ValueError, match="unexpected channels"):
+        emb({"a": torch.randn(1, 2, 3), "b": torch.randn(1, 2, 5)})
+
+
+def test_channel_mixer_embedder_deterministic_with_seed():
+    """Two forward passes on identical inputs under the same seed match."""
+    channel_dims = {"a": 4, "b": 3}
+    feats = {"a": torch.randn(2, 6, 4), "b": torch.randn(2, 6, 3)}
+    torch.manual_seed(0)
+    emb1 = ChannelMixerEmbedder(channel_dims, d_model=16, mixer_dim=32, n_heads=2)
+    out1 = emb1(feats)
+    torch.manual_seed(0)
+    emb2 = ChannelMixerEmbedder(channel_dims, d_model=16, mixer_dim=32, n_heads=2)
+    out2 = emb2(feats)
+    assert torch.allclose(out1, out2, atol=1e-6)
+
+
+def test_market_state_transformer_fusion_mixer_uses_channel_mixer():
+    """cfg.fusion='mixer' swaps the embedder for ChannelMixerEmbedder."""
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=64,
+        channel_dims={"target__SPY": 10, "market_context__VIX": 4},
+        d_model=64,
+        fusion="mixer",
+        mixer_dim=96,
+        mixer_n_heads=2,
+    )
+    model = MarketStateTransformer(cfg)
+    assert type(model.embedder) is ChannelMixerEmbedder
+    # Forward still produces the transformer output shape.
+    feats = {
+        "target__SPY": torch.randn(1, 8, 10),
+        "market_context__VIX": torch.randn(1, 8, 4),
+    }
+    logits = model(feats)
+    assert logits.shape == (1, 8, 32)
+
+
+# Sprint 087: PatchEmbedder -------------------------------------------------
+
+
+def test_patch_embedder_output_shape():
+    """PatchEmbedder(feats) with T divisible by patch_size returns [B, T//p, d_model]."""
+    emb = PatchEmbedder({"target__SPY": 4, "market_context__VIX": 3}, d_model=64, patch_size=4)
+    feats = {
+        "target__SPY": torch.randn(2, 16, 4),
+        "market_context__VIX": torch.randn(2, 16, 3),
+    }
+    out = emb(feats)
+    assert out.shape == (2, 4, 64)
+
+
+def test_patch_embedder_rejects_non_divisible_context():
+    """T % patch_size != 0 raises a clear error."""
+    emb = PatchEmbedder({"a": 3}, d_model=8, patch_size=4)
+    with pytest.raises(ValueError, match="divisible"):
+        emb({"a": torch.randn(1, 15, 3)})
+
+
+def test_patch_embedder_rejects_extra_channels():
+    """Same train-time-drift-is-loud discipline as the other embedders."""
+    emb = PatchEmbedder({"a": 3}, d_model=8, patch_size=4)
+    with pytest.raises(ValueError, match="unexpected channels"):
+        emb({"a": torch.randn(1, 8, 3), "b": torch.randn(1, 8, 5)})
+
+
+def test_market_state_transformer_patch4_output_shrunk():
+    """cfg.patch_size=4 → PatchEmbedder; forward output is [B, T//4, V]."""
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=64,
+        channel_dims={"target__SPY": 4},
+        d_model=128,
+        n_heads=2,
+        patch_size=4,
+    )
+    model = MarketStateTransformer(cfg)
+    assert type(model.embedder) is PatchEmbedder
+    feats = {"target__SPY": torch.randn(1, 64, 4)}
+    logits = model(feats)
+    assert logits.shape == (1, 16, 32)
+
+
+def test_market_state_transformer_rejects_unknown_patch_size():
+    with pytest.raises(ValueError, match="patch_size must be 1 or 4"):
+        MarketStateTransformer(
+            MarketStateTransformerConfig(
+                vocab_size=32,
+                context_len=64,
+                channel_dims={"a": 3},
+                d_model=16,
+                patch_size=2,
+            )
+        )
+
+
+def test_market_state_transformer_rejects_indivisible_context_len():
+    """patch_size must divide context_len."""
+    with pytest.raises(ValueError, match="divisible by patch_size"):
+        MarketStateTransformer(
+            MarketStateTransformerConfig(
+                vocab_size=32,
+                context_len=63,
+                channel_dims={"a": 3},
+                d_model=16,
+                patch_size=4,
+            )
+        )
+
+
+# Sprint 089: pinball loss + quantile head --------------------------------
+
+
+def test_pinball_loss_zero_on_perfect_prediction():
+    """Predictions match targets exactly → loss 0 across every quantile."""
+    from price_space_llm.model.trainer import pinball_loss
+
+    targets = torch.tensor([0.1, 0.2, -0.1], dtype=torch.float32)
+    preds = targets.unsqueeze(1).expand(-1, N_QUANTILES).contiguous()
+    loss = pinball_loss(preds, targets, QUANTILE_LEVELS)
+    assert float(loss.item()) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_pinball_loss_symmetric_at_median():
+    """Q=0.5: over-predict and under-predict by the same amount → equal loss."""
+    from price_space_llm.model.trainer import pinball_loss
+
+    targets = torch.tensor([1.0], dtype=torch.float32)
+    over = torch.tensor([[1.5]], dtype=torch.float32)  # p > t
+    under = torch.tensor([[0.5]], dtype=torch.float32)
+    loss_over = float(pinball_loss(over, targets, (0.5,)).item())
+    loss_under = float(pinball_loss(under, targets, (0.5,)).item())
+    assert loss_over == pytest.approx(loss_under)
+    # Analytical value: 0.5 * |1.5 - 1.0| = 0.25.
+    assert loss_over == pytest.approx(0.25)
+
+
+def test_pinball_loss_ignores_nan_targets():
+    """NaN targets skip the term without affecting valid rows."""
+    from price_space_llm.model.trainer import pinball_loss
+
+    targets = torch.tensor([0.1, float("nan"), 0.3], dtype=torch.float32)
+    preds = torch.tensor([[0.1], [999.0], [0.3]], dtype=torch.float32)
+    loss = pinball_loss(preds, targets, (0.5,))
+    # Rows 0 and 2 are perfect predictions → loss 0. NaN row skipped entirely.
+    assert float(loss.item()) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_market_state_transformer_quantile_head_output_shape():
+    """head_type='quantile' → forward returns [B, T', N_QUANTILES=9]."""
+    cfg = MarketStateTransformerConfig(
+        vocab_size=32,
+        context_len=32,
+        channel_dims={"target__SPY": 4},
+        d_model=64,
+        n_heads=4,
+        head_type="quantile",
+    )
+    model = MarketStateTransformer(cfg)
+    feats = {"target__SPY": torch.randn(1, 8, 4)}
+    out = model(feats)
+    assert out.shape == (1, 8, N_QUANTILES)
+
+
+def test_market_state_transformer_rejects_unknown_head_type():
+    with pytest.raises(ValueError, match="head_type must be"):
+        MarketStateTransformer(
+            MarketStateTransformerConfig(
+                vocab_size=32,
+                context_len=16,
+                channel_dims={"a": 3},
+                d_model=16,
+                head_type="wrong",
+            )
+        )
+
+
+def test_market_state_transformer_rejects_unknown_fusion():
+    with pytest.raises(ValueError, match="fusion must be 'sum' or 'mixer'"):
+        MarketStateTransformer(
+            MarketStateTransformerConfig(
+                vocab_size=32,
+                context_len=8,
+                channel_dims={"a": 3},
+                d_model=16,
+                fusion="wrong",
+            )
+        )
+
+
 # WindowSamplerFeats (Sprint 053) -----------------------------------------
 
 
@@ -293,7 +562,7 @@ def _sample_artifact(n_rows: int = 200) -> TokenizedArtifact:
         is_overnight_gap=None,
         mask=torch.ones(n_rows, dtype=torch.bool),
         channel_names=("market_context__VIX", "target__SPY"),
-        meta={"run_id": "test"},
+        meta={"run_id": "test", "normalized": True},
     )
 
 
@@ -337,7 +606,7 @@ def test_window_sampler_feats_rejects_mismatched_lengths():
         is_overnight_gap=None,
         mask=torch.zeros(100, dtype=torch.bool),
         channel_names=("a", "b"),
-        meta={},
+        meta={"normalized": True},
     )
     with pytest.raises(ValueError, match=r"length 99 != 100"):
         WindowSamplerFeats(artifact, context_len=8, batch_size=1, generator=torch.Generator())
@@ -392,7 +661,7 @@ def test_zero_non_target_features_zeros_non_target_channels():
         is_overnight_gap=None,
         mask=torch.ones(n, dtype=torch.bool),
         channel_names=("macro__CPI", "market_context__VIX", "target__SPY"),
-        meta={"run_id": "test"},
+        meta={"run_id": "test", "normalized": True},
     )
     zeroed = zero_non_target_features(artifact, target_symbol="SPY")
     # Target unchanged.
@@ -420,7 +689,7 @@ def test_zero_non_target_features_rejects_missing_target():
         is_overnight_gap=None,
         mask=torch.ones(n, dtype=torch.bool),
         channel_names=("market_context__VIX",),
-        meta={},
+        meta={"normalized": True},
     )
     with pytest.raises(ValueError, match="target key 'target__SPY' not in artifact"):
         zero_non_target_features(artifact, target_symbol="SPY")
@@ -449,7 +718,7 @@ def test_zero_non_target_features_composes_with_run_training_feats(tmp_path: Pat
         is_overnight_gap=None,
         mask=torch.ones(n, dtype=torch.bool),
         channel_names=("market_context__VIX", "target__SPY"),
-        meta={},
+        meta={"normalized": True},
     )
     zeroed = zero_non_target_features(artifact, target_symbol="SPY")
     cfg = MarketStateTransformerConfig(
@@ -475,3 +744,31 @@ def test_zero_non_target_features_composes_with_run_training_feats(tmp_path: Pat
         checkpoint_dir=tmp_path / "ckpts",
     )
     assert result.final_step == 2
+
+
+# Sprint 095 (review 074-094 § 7.4): patch=4 target-alignment invariant ----
+
+
+def test_patch_targets_alignment_invariant_matches_paper_indexing():
+    """Sprint 087 arithmetic: `targets[:, p-1::p]` per _patch_targets.
+
+    For patch=4, T=16, the slice picks positions [3, 7, 11, 15]:
+    patched-position q's target is sampler-slice index (q+1)*p - 1.
+    """
+    from price_space_llm.model.trainer import _patch_targets
+
+    targets = torch.arange(16, dtype=torch.int64).unsqueeze(0)  # [1, 16] filled 0..15
+    # patch_size = 1 → identity.
+    same = _patch_targets(targets, 1)
+    assert same.tolist() == [list(range(16))]
+    # patch_size = 4 → [3, 7, 11, 15].
+    patched = _patch_targets(targets, 4)
+    assert patched.tolist() == [[3, 7, 11, 15]]
+    # patch_size = 4 with T=64 → 16 elements starting at 3, step 4, ending at 63.
+    long_targets = torch.arange(64, dtype=torch.int64).unsqueeze(0)
+    long_patched = _patch_targets(long_targets, 4)
+    expected = list(range(3, 64, 4))
+    assert long_patched.shape == (1, 16)
+    assert long_patched.tolist() == [expected]
+    # Sanity: last element = (T // patch - 1 + 1) * patch - 1 = T - 1.
+    assert long_patched[0, -1].item() == 63

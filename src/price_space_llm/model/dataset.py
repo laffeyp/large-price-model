@@ -122,10 +122,21 @@ class TokenizedArtifact:
 
     features: dict[str, Tensor]  # {channel__symbol: Tensor[T, F_c]}
     targets: Tensor  # Tensor[T] int64; -100 = null (PyTorch CE ignore_index)
+    # Sprint 088: raw float log-return per grid position; NaN where the
+    # log_return column was null (same rows where targets == -100). None on
+    # pre-Sprint-088 artifacts. Consumed by the quantile-head ablation
+    # (Sprint 089); ignored by the categorical head. Defaults to None so
+    # every pre-Sprint-088 caller constructs the dataclass unchanged.
+    raw_targets: Tensor | None = None
     vol: Tensor  # Tensor[T] float32; target's realized_vol_30
     timestamps: Tensor  # Tensor[T] int64; UTC Unix seconds
     is_overnight_gap: Tensor | None  # Tensor[T] int8 (Sprint 055) or None
-    mask: Tensor  # Tensor[T] bool; True iff every feature is non-null
+    # Sprint 075 semantic: True iff row is a valid training example for the
+    # target (target features non-null AND targets != -100). Pre-Sprint-075
+    # artifacts on disk carry the old semantic (all-features-non-null) and
+    # collapse to all-False on the real corpus; check
+    # `meta.get("mask_semantics")` before consuming.
+    mask: Tensor  # Tensor[T] bool
     channel_names: tuple[str, ...]
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -144,6 +155,10 @@ class WindowBatchFeats:
     feats: dict[str, Tensor]
     targets: Tensor
     starts: tuple[int, ...]
+    # Sprint 089: parallel float raw targets for the quantile-head loss.
+    # None when the source artifact has raw_targets=None (pre-Sprint-088 .pt
+    # or explicit categorical-only fixture).
+    raw_targets: Tensor | None = None
 
 
 class WindowSamplerFeats:
@@ -193,8 +208,22 @@ class WindowSamplerFeats:
         targets = torch.stack(
             [self._artifact.targets[s + 1 : s + 1 + self._context_len] for s in starts]
         )  # (B, T)
+        # Sprint 089: sample raw_targets in parallel when present.
+        raw_targets: Tensor | None = None
+        if self._artifact.raw_targets is not None:
+            raw_targets = torch.stack(
+                [
+                    self._artifact.raw_targets[s + 1 : s + 1 + self._context_len]
+                    for s in starts
+                ]
+            )
         starts_tuple = tuple(int(x) for x in starts.tolist())
-        return WindowBatchFeats(feats=feats, targets=targets, starts=starts_tuple)
+        return WindowBatchFeats(
+            feats=feats,
+            targets=targets,
+            starts=starts_tuple,
+            raw_targets=raw_targets,
+        )
 
     def n_valid_starts(self) -> int:
         return self._max_start + 1
@@ -230,6 +259,7 @@ def zero_non_target_features(artifact: TokenizedArtifact, target_symbol: str) ->
     return TokenizedArtifact(
         features=new_features,
         targets=artifact.targets,
+        raw_targets=artifact.raw_targets,
         vol=artifact.vol,
         timestamps=artifact.timestamps,
         is_overnight_gap=artifact.is_overnight_gap,
@@ -239,21 +269,55 @@ def zero_non_target_features(artifact: TokenizedArtifact, target_symbol: str) ->
     )
 
 
-def load_tokens_pt(path: Path) -> TokenizedArtifact:
+CURRENT_MASK_SEMANTICS = "target_valid_v075"
+
+
+class LegacyMaskSemanticRefused(RuntimeError):
+    """Raised when `load_tokens_pt` reads an artifact whose `mask_semantics`
+    marker does not match `CURRENT_MASK_SEMANTICS` and the caller has not
+    opted into legacy tolerance via `allow_legacy_mask=True`.
+
+    Sprint 077 tightens the Sprint 075 hand-tight marker into a bit-tight
+    load-time refusal. Pre-Sprint-075 artifacts carry an all-False mask
+    field (sparse event channels poisoned the all-non-null check); loading
+    them silently would let a downstream consumer treat every row as invalid.
+    """
+
+
+def load_tokens_pt(
+    path: Path,
+    *,
+    allow_legacy_mask: bool = False,
+) -> TokenizedArtifact:
     """Read a Sprint 052 tokenized `.pt` artifact and return the typed dataclass.
 
     Raises `ValueError` if any required key is missing (features, targets,
     vol, timestamps, mask, channel_names, meta). `is_overnight_gap` is
     optional and defaults to None.
+
+    Sprint 077: raises `LegacyMaskSemanticRefused` when
+    `meta.get("mask_semantics") != CURRENT_MASK_SEMANTICS` unless the caller
+    passes `allow_legacy_mask=True`. The old all-features-non-null semantic
+    collapsed to all-False on the real corpus (Sprint 052 named this;
+    Sprint 075 fixed it and stamped `target_valid_v075`).
     """
     payload = torch.load(path, weights_only=False)
     required = ("features", "targets", "vol", "timestamps", "mask", "channel_names", "meta")
     for k in required:
         if k not in payload:
             raise ValueError(f"tokens .pt at {path} missing required field {k!r}")
+    marker = payload["meta"].get("mask_semantics")
+    if marker != CURRENT_MASK_SEMANTICS and not allow_legacy_mask:
+        raise LegacyMaskSemanticRefused(
+            f"tokens .pt at {path} has mask_semantics={marker!r}; expected "
+            f"{CURRENT_MASK_SEMANTICS!r}. Regenerate via scripts/bucketize.py "
+            "or pass allow_legacy_mask=True after acknowledging the legacy semantic."
+        )
     return TokenizedArtifact(
         features=payload["features"],
         targets=payload["targets"],
+        # Sprint 088: raw_targets is optional; None on pre-Sprint-088 artifacts.
+        raw_targets=payload.get("raw_targets"),
         vol=payload["vol"],
         timestamps=payload["timestamps"],
         is_overnight_gap=payload.get("is_overnight_gap"),

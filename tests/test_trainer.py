@@ -267,7 +267,7 @@ def test_run_training_feats_adamw_smoke(tmp_path: Path):
         is_overnight_gap=None,
         mask=torch.ones(n, dtype=torch.bool),
         channel_names=("market_context__VIX", "target__SPY"),
-        meta={},
+        meta={"normalized": True},
     )
     cfg = MarketStateTransformerConfig(
         vocab_size=32,
@@ -368,7 +368,7 @@ def test_run_training_feats_writes_val_nll_into_checkpoint(tmp_path: Path):
         is_overnight_gap=None,
         mask=torch.ones(n, dtype=torch.bool),
         channel_names=("target__SPY",),
-        meta={},
+        meta={"normalized": True},
     )
     cfg = MarketStateTransformerConfig(
         vocab_size=32,

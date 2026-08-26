@@ -1,0 +1,42 @@
+{
+  "budgets": [
+    {
+      "BudgetName": "pslm-v1-500",
+      "BudgetLimit": {"Amount": "500", "Unit": "USD"},
+      "TimeUnit": "MONTHLY",
+      "BudgetType": "COST",
+      "CostFilters": {"TagKeyValue": ["user:Project$price-space-llm-v1"]}
+    },
+    {
+      "BudgetName": "pslm-v1-1500",
+      "BudgetLimit": {"Amount": "1500", "Unit": "USD"},
+      "TimeUnit": "MONTHLY",
+      "BudgetType": "COST",
+      "CostFilters": {"TagKeyValue": ["user:Project$price-space-llm-v1"]}
+    },
+    {
+      "BudgetName": "pslm-v1-3000",
+      "BudgetLimit": {"Amount": "3000", "Unit": "USD"},
+      "TimeUnit": "MONTHLY",
+      "BudgetType": "COST",
+      "CostFilters": {"TagKeyValue": ["user:Project$price-space-llm-v1"]}
+    }
+  ],
+  "notifications": [
+    {
+      "NotificationType": "ACTUAL",
+      "ComparisonOperator": "GREATER_THAN",
+      "Threshold": 100,
+      "ThresholdType": "PERCENTAGE",
+      "NotificationState": "ALARM"
+    },
+    {
+      "NotificationType": "FORECASTED",
+      "ComparisonOperator": "GREATER_THAN",
+      "Threshold": 90,
+      "ThresholdType": "PERCENTAGE",
+      "NotificationState": "OK"
+    }
+  ],
+  "notes": "Advisory-only. AWS Budgets emails via SNS; no RunInstances stop action wired. A breach informs, it does not halt. The three tiers ($500 / $1,500 / $3,000) sit at first-sweep-in-progress / halfway-through-v1 / above-realistic-total. Estimated v1 total ~$1,700 with ~$2,500 headroom; the $3,000 tier is investigate-before-continuing, not stop."
+}

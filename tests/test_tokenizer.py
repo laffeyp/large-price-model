@@ -374,6 +374,358 @@ def test_run_tokenizer_pt_meta_carries_run_id_and_target(tmp_path: Path):
     assert meta["git_sha"] == "abc123"
 
 
+# Sprint 078: tokenized .pt through write_versioned -----------------------
+
+
+def test_run_tokenizer_pt_writes_raw_targets(tmp_path: Path):
+    """Sprint 088: raw_targets carries float log_return with NaN where the source was null."""
+    n_rows = 200
+    log_returns: list[float | None] = [
+        -0.02 + 0.04 * (i / max(1, n_rows - 1)) for i in range(n_rows)
+    ]
+    log_returns[5] = None
+    log_returns[42] = None
+    features = _multichannel_features(n_rows=n_rows, log_returns=log_returns)  # type: ignore[arg-type]
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="v088-raw",
+    )
+    payload = torch.load(output, weights_only=False)
+    raw = payload["raw_targets"]
+    assert raw.dtype == torch.float32
+    assert raw.shape == (n_rows,)
+    # Null positions become NaN; valid positions match log_returns.
+    assert torch.isnan(raw[5])
+    assert torch.isnan(raw[42])
+    assert float(raw[0]) == pytest.approx(-0.02, abs=1e-6)
+    assert payload["meta"]["raw_targets_stamped"] == "v088"
+
+
+def test_run_tokenizer_pt_stamps_normalized_false_without_normalizer(tmp_path: Path):
+    """Sprint 084 (v0.7): un-normalized write stamps meta['normalized'] = False + emit."""
+    features = _multichannel_features(n_rows=100)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="v07-unnorm",
+    )
+    payload = torch.load(output, weights_only=False)
+    assert payload["meta"]["normalized"] is False
+    emit = next(s for s in e.snapshot() if s.tag == "TOKENIZED_ARTIFACT_WRITTEN")
+    assert emit.payload["normalized"] is False
+
+
+def test_run_tokenizer_pt_emits_tokenized_artifact_written(tmp_path: Path):
+    """Sprint 080 (v0.6): run_tokenizer_pt emits TOKENIZED_ARTIFACT_WRITTEN once."""
+    features = _multichannel_features(n_rows=100)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="v080-emit",
+    )
+    emits = [s for s in e.snapshot() if s.tag == "TOKENIZED_ARTIFACT_WRITTEN"]
+    assert len(emits) == 1
+    payload = emits[0].payload
+    assert payload["run_id"] == "v080-emit"
+    assert payload["path"] == str(output)
+    assert payload["mask_semantics"] == "target_valid_v075"
+    assert payload["n_rows"] == 100
+    assert payload["n_channels"] >= 2  # target + market_context + session__flags
+
+
+def test_run_tokenizer_pt_writes_versioned_with_sidecar(tmp_path: Path):
+    """Sprint 078: write lands at `tokens.{run_id}.pt` + `.sha256` sidecar
+    + `tokens.latest.pt` symlink."""
+    import hashlib
+
+    features = _multichannel_features(n_rows=100)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output_dir = tmp_path / "tokenized"
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=output_dir,
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="v078-test",
+    )
+    versioned = output_dir / "tokens.v078-test.pt"
+    sidecar = output_dir / "tokens.v078-test.pt.sha256"
+    latest = output_dir / "tokens.latest.pt"
+    assert versioned.exists()
+    assert sidecar.exists()
+    assert latest.is_symlink()
+    assert output == versioned
+    # Sidecar content == sha256 of the .pt file bytes.
+    sha_written = sidecar.read_text(encoding="utf-8").strip()
+    sha_actual = hashlib.sha256(versioned.read_bytes()).hexdigest()
+    assert sha_written == sha_actual
+
+
+def test_run_tokenizer_pt_returns_versioned_path(tmp_path: Path):
+    """Return value is the versioned path, not the bare `tokens.pt` base."""
+    features = _multichannel_features(n_rows=100)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="v078-return",
+    )
+    assert output.name == "tokens.v078-return.pt"
+
+
+def test_run_tokenizer_pt_second_write_flips_symlink_and_preserves_prior(tmp_path: Path):
+    """Two writes with distinct run_ids: both .pt files land on disk;
+    `tokens.latest.pt` resolves to the second one. Hard rule 12 preserved."""
+    features = _multichannel_features(n_rows=100)
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        features,
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output_dir = tmp_path / "tokenized"
+    first = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=output_dir,
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="first",
+    )
+    second = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=output_dir,
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="second",
+    )
+    # Both files present.
+    assert first.exists()
+    assert second.exists()
+    assert first != second
+    # Symlink resolves to the second write.
+    latest = output_dir / "tokens.latest.pt"
+    assert latest.is_symlink()
+    assert latest.resolve() == second.resolve()
+
+
+# Sprint 075: mask redefinition (target-valid semantics) -------------------
+
+
+def test_mask_target_valid_on_synthetic_frame(tmp_path: Path):
+    """Mask reads True iff target features non-null AND target label present.
+
+    Truth table across 4 rows:
+      row 0: target features valid, target label valid  → True
+      row 1: target features null,  target label valid  → False (feature null)
+      row 2: target features valid, target label null   → False (target -100)
+      row 3: target features null,  target label null   → False
+    """
+    n_rows = 4
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n_rows)]
+    known_at = [base + timedelta(minutes=15 * i, seconds=1) for i in range(n_rows)]
+    # log_return in-range for rows 0 and 1; null for rows 2 and 3 (targets->-100).
+    log_returns: list[float | None] = [0.001, 0.002, None, None]
+    # Feature rolling_mean_20 null on row 1 and row 3 to break target-feature validity.
+    rolling_mean: list[float | None] = [0.0, None, 0.0, None]
+    features = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__log_return": log_returns,
+            "target__SPY__rolling_mean_20": rolling_mean,
+            "target__SPY__rolling_std_20": [0.01] * n_rows,
+            "target__SPY__rolling_z_score_20": [0.0] * n_rows,
+            "target__SPY__realized_vol_30": [0.005] * n_rows,
+        }
+    )
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        pl.DataFrame(
+            {
+                "grid_ts": [datetime(2024, 6, 3, tzinfo=UTC) + timedelta(minutes=15 * i)
+                            for i in range(200)],
+                "target__SPY__log_return": [0.001 * (i - 100) for i in range(200)],
+            }
+        ),
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="test-mask-truth-table",
+    )
+    payload = torch.load(output, weights_only=False)
+    mask = payload["mask"]
+    assert mask.dtype == torch.bool
+    assert mask.tolist() == [True, False, False, False]
+
+
+def test_mask_ignores_non_target_null_columns(tmp_path: Path):
+    """Non-target null columns must NOT depress mask.
+
+    A 3-row frame where target features + label are all valid but
+    `market_context__QQQ__log_return` is all-null. Mask should be all-True.
+    Pre-Sprint-075 semantic would collapse to all-False here.
+    """
+    n_rows = 3
+    base = datetime(2024, 6, 3, 14, 45, tzinfo=UTC)
+    grid_ts = [base + timedelta(minutes=15 * i) for i in range(n_rows)]
+    known_at = [base + timedelta(minutes=15 * i, seconds=1) for i in range(n_rows)]
+    features = pl.DataFrame(
+        {
+            "grid_ts": grid_ts,
+            "target__SPY__known_at": known_at,
+            "target__SPY__log_return": [0.001, 0.002, 0.003],
+            "target__SPY__rolling_mean_20": [0.0] * n_rows,
+            "target__SPY__rolling_std_20": [0.01] * n_rows,
+            "target__SPY__rolling_z_score_20": [0.0] * n_rows,
+            "target__SPY__realized_vol_30": [0.005] * n_rows,
+            "market_context__QQQ__known_at": known_at,
+            "market_context__QQQ__log_return": [None, None, None],
+            "market_context__QQQ__rolling_mean_20": [0.0] * n_rows,
+            "market_context__QQQ__rolling_std_20": [0.02] * n_rows,
+            "market_context__QQQ__rolling_z_score_20": [0.0] * n_rows,
+        }
+    )
+    features_path = _write_features(tmp_path, features)
+    e = _fresh_emitter()
+    stats = fit_bucketizer(
+        pl.DataFrame(
+            {
+                "grid_ts": [datetime(2024, 6, 3, tzinfo=UTC) + timedelta(minutes=15 * i)
+                            for i in range(200)],
+                "target__SPY__log_return": [0.001 * (i - 100) for i in range(200)],
+            }
+        ),
+        target_symbol="SPY",
+        n_buckets=32,
+        training_range_start=date(2024, 6, 3),
+        training_range_end=date(2024, 7, 3),
+        emitter=e,
+    )
+    output = run_tokenizer_pt(
+        features_path=features_path,
+        output_dir=tmp_path / "tokenized",
+        stats=stats,
+        target_symbol="SPY",
+        emitter=e,
+        run_id="test-mask-non-target-null",
+    )
+    payload = torch.load(output, weights_only=False)
+    mask = payload["mask"]
+    assert mask.tolist() == [True, True, True]
+
+
+REPO_ROOT_FOR_MASK = Path(__file__).resolve().parents[1]
+
+
+def test_mask_present_on_regenerated_real_corpus():
+    """Regenerated 2015-2022 training .pt reports mask.sum() > 0 and the new marker.
+
+    Skips if the training .pt artifact isn't on disk. Sprint 075's success
+    criterion — pre-fix `mask.sum() == 0` on this exact file.
+    """
+    # Sprint 078: writes now land at `tokens.{run_id}.pt` + `tokens.latest.pt`
+    # symlink. Prefer the symlink; fall back to the pre-Sprint-078 bare-path
+    # file if the symlink isn't present yet.
+    versioned_symlink = REPO_ROOT_FOR_MASK / "data" / "tokenized" / "tokens.latest.pt"
+    bare_legacy = REPO_ROOT_FOR_MASK / "data" / "tokenized" / (
+        "tokenize-features-align-2015-01-2022-12-"
+        "0000000000000000-0000000000000000-0000000000000000.pt"
+    )
+    if versioned_symlink.exists():
+        training_pt = versioned_symlink
+    elif bare_legacy.exists():
+        training_pt = bare_legacy
+    else:
+        pytest.skip(f".pt not on disk (neither {versioned_symlink} nor {bare_legacy})")
+    payload = torch.load(training_pt, weights_only=False)
+    marker = payload["meta"].get("mask_semantics")
+    if marker != "target_valid_v075":
+        pytest.skip(
+            "training .pt was written pre-Sprint-075; regenerate via scripts/bucketize.py "
+            "before this test asserts."
+        )
+    assert int(payload["mask"].sum()) > 0
+
+
 # Property-based ------------------------------------------------------------
 
 

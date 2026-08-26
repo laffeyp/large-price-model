@@ -1,0 +1,4788 @@
+{
+  "_note": "Vocabulary v0.7 (locked 2026-08-17). Extends CONFIG_RESOLVED with six model-architecture fields (d_model, n_layers, n_heads, fusion, mixer_dim, mixer_n_heads); extends TOKENIZED_ARTIFACT_WRITTEN with `normalized`. Closes three drift-watchlist entries (Sprint 073 model shape, Sprint 083 fusion axis, Sprint 083 mixer-normalization contract) via Sprint 084. Zero tags added; zero tags removed; six payload fields added on one tag, one field added on another. Prior versions remain on disk per hard rule 12. See signals/0.7-rationale.md.",
+  "version": "0.7",
+  "project": "price-space-llm",
+  "locked": true,
+  "locked_at": "2026-08-17",
+  "locked_by": "Architect (Peter Laffey), v0.7 lock 2026-08-17 per Sprint 084 (CONFIG_RESOLVED + TOKENIZED_ARTIFACT_WRITTEN payload extensions)",
+  "prior_version": "0.6",
+  "ontology": {
+    "_layer": "Layer 0 \u2014 Ontology. 25 entities in entities[] (unambiguously spec-named nouns without a Step-1 halt condition). 6 in entity_implied_but_unnamed.flags[] (Architect stamps inline: Bucket, MetricSnapshot, Split, Session, ExperimentConfig, Source). The four Layer-6-forward placeholders (IngestionClient, AlignmentJoin, TrainingLoop, Simulator) moved to BLACKBOARD \u00a7 Deferred, folded into P-015's Step-7 commitment \u2014 one uniform mechanism for forward-commitments across layer boundaries. Three merges pending in signals/proposals.json \u2014 Model is the target of P-001, Prediction of P-002, CostCalibration of P-003; entries below reflect the post-merge shape.",
+    "entities": [
+      {
+        "name": "Bar",
+        "definition": "One 15-minute OHLCV observation on the canonical UTC grid for any Symbol; the target instrument produces target bars, the cross-asset context Symbols (QQQ, IWM, VIX, TLT, DXY, GLD, USO) produce context bars, both types share the same schema and grid.",
+        "source": "product-spec-v4.md \u00a7'Why 15-minute'; tech-arch-v4.md \u00a75 'each session yields 26 bars (6.5 hours \u00d7 4 bars/hour)'; \u00a74.2 channel table listing 15-min bars for target + market_context Symbols; definition broadening: reviews/vocab-0.1-round-3-review.md finding 7."
+      },
+      {
+        "name": "Symbol",
+        "definition": "A market instrument identifier (SPY, QQQ, VIX, TLT, ...) a channel fetcher requests from a source; a runtime parameter, never hardcoded in `src/`.",
+        "source": "product-spec-v4.md \u00a7'No hardcoded target instrument'; tech-arch-v4.md invariant #7."
+      },
+      {
+        "name": "Channel",
+        "definition": "A categorical grouping of data streams contributing features at every timestep: target, market_context, macro, options, event.",
+        "source": "tech-arch-v4.md \u00a74.2 table 'target / market_context / macro / options / event'."
+      },
+      {
+        "name": "SessionBoundary",
+        "definition": "The join between one Session's last bar and the next Session's first bar; marked at bar level by `is_overnight_gap`.",
+        "source": "tech-arch-v4.md \u00a76 'Session-boundary handling'; product-spec-v4.md \u00a7'Channels tokenized at every 15-minute timestep' (`is_overnight_gap`)."
+      },
+      {
+        "name": "RawObservation",
+        "definition": "One vendor-native row written to `data/raw/` carrying value_time, released_at, known_at, and (where applicable) revision_id \u2014 the four-column schema that makes causality a data-model property.",
+        "source": "tech-arch-v4.md \u00a74.3 'Every raw observation written to data/raw/ carries four columns'."
+      },
+      {
+        "name": "Revision",
+        "definition": "A restated version of a previously-published value; each revision writes a new row with a monotone revision_id within (source, channel, symbol, value_time).",
+        "source": "tech-arch-v4.md \u00a74.3 'each revision writes a new row with a new revision_id'."
+      },
+      {
+        "name": "ChannelManifest",
+        "definition": "The Phase 0 probe's per-channel record of source, symbol, requested vs actual frequency, earliest and latest timestamp, missing fraction, timezone, timestamp semantics, and revision behavior; committed to the repo and consulted by every alignment run.",
+        "source": "tech-arch-v4.md \u00a74.1 'data/manifests/channel_coverage.json'; product-spec-v4.md \u00a7'Phase 0 data-availability probe'."
+      },
+      {
+        "name": "AlignedRow",
+        "definition": "One row on the canonical 15-minute UTC grid produced by as-of joining every channel on `known_at`; carries every channel's value, missing_mask, age_since_known_at, and observed_at_this_grid_step for that timestamp.",
+        "source": "tech-arch-v4.md \u00a75 'one wide table on a canonical 15-minute UTC grid'."
+      },
+      {
+        "name": "Feature",
+        "definition": "A causally computed per-bar value derived from RawObservation columns and AlignedRow context; every rolling window has `min_periods` and every label-adjacent column is `.shift(1)`-ed.",
+        "source": "tech-arch-v4.md \u00a76 'Every feature is computed with strictly causal utilities'."
+      },
+      {
+        "name": "NormalizerState",
+        "definition": "The frozen expanding-window z-score parameters (mean, std, warmup mask) fitted on the training partition and persisted to `artifacts/{run_id}/normalizers.pt`; validation and test read the state as-is. Layer-0 seat for the Normalizer operator (Layer 6, populated Step 7).",
+        "source": "tech-arch-v4.md \u00a76 'Normalization \u2014 one scheme, committed'; product-spec-v4.md \u00a7'Feature normalization'; reclassification rationale: reviews/vocab-0.1-layer-0-review.md finding 4."
+      },
+      {
+        "name": "BucketStats",
+        "definition": "The frozen dequantizer file `artifacts/tokenizer/bucket_stats.json` \u2014 one entry per bucket carrying `bucket_lower`, `bucket_upper`, `bucket_train_mean`, `bucket_train_median`, `bucket_train_frequency`; the artifact every downstream consumer reads to convert a bucket id back to an expected return. Layer-0 seat for the Bucketizer operator (Layer 6, populated Step 7).",
+        "source": "tech-arch-v4.md \u00a77.1; reclassification rationale: reviews/vocab-0.1-layer-0-review.md finding 4."
+      },
+      {
+        "name": "MarketStateToken",
+        "definition": "One `d_model`-dimensional vector per bar produced by the Embedder operator (Layer 6, populated Step 7); the temporal transformer attends over the sequence of these.",
+        "source": "tech-arch-v4.md \u00a77.2 'the single d_model-vector the transformer treats as position t'."
+      },
+      {
+        "name": "Window",
+        "definition": "A fixed-length slice of MarketStateTokens (context_len bars) with per-position targets and a per-position validity mask; the training loop's sampling unit.",
+        "source": "tech-arch-v4.md \u00a79.2 `PriceSpaceDataset`; product-spec-v4.md \u00a7'Training loss and windowing'."
+      },
+      {
+        "name": "Model",
+        "definition": "A trainable network \u2014 one of PriceSpaceLLM, LinearBaseline, MLPBaseline, GRUBaseline, ChannelMixerVariant, PatchNVariant, QuantileHeadVariant, TargetOnlyVariant, MagnitudeWeightedVariant; distinguished at Layer 2 by a payload attribute `run_kind` on TrainingRun. Merge Baseline+Ablation\u2192Model stamped 2026-08-09 via P-001; nine variants distinguished at Layer 2 by `run_kind`.",
+        "source": "tech-arch-v4.md \u00a78 (PriceSpaceLLM) + \u00a710 (baselines and ablations); P-001 stamped accepted 2026-08-09."
+      },
+      {
+        "name": "TrainingRun",
+        "definition": "A single training execution keyed by run_id; one row in `experiments/logbook.csv`, one directory `artifacts/{run_id}/`; carries ExperimentConfig, git SHA, data hash, seed, `run_kind`.",
+        "source": "tech-arch-v4.md \u00a75 (`data/aligned/{run_id}.parquet`), \u00a712 (logbook row), \u00a713 (SDD trace metadata)."
+      },
+      {
+        "name": "Checkpoint",
+        "definition": "A saved model state at a specific training step; contains model, optimizer, scheduler, RNG states, config, git SHA, data hash, step, val_metrics.",
+        "source": "tech-arch-v4.md \u00a79.3 'checkpoint {model, optimizer, scheduler, rng_states, config, git_sha, data_hash, step, val_metrics}'."
+      },
+      {
+        "name": "Prediction",
+        "definition": "The model's output at a position \u2014 a probability distribution over V buckets \u2014 with derived scalars (expected_vn_return, expected_return, p_up, sharpness). Merge Distribution\u2192Prediction stamped 2026-08-09 via P-002.",
+        "source": "tech-arch-v4.md \u00a711 'softmaxes to p[t] \u2208 \u211d^V, then derives ...'."
+      },
+      {
+        "name": "Metric",
+        "definition": "A named validation number reported per training run: NLL, ECE, Brier, RPS, directional accuracy, top-1/top-3 accuracy; NLL alone gates checkpoint selection.",
+        "source": "tech-arch-v4.md \u00a79.3 + \u00a710 'Prediction metrics'; product-spec-v4.md \u00a7'Training infrastructure'."
+      },
+      {
+        "name": "RegimeLabel",
+        "definition": "A VIX tercile tag (low / mid / high) attached to a held-out bar, computed on the training window and frozen; every held-out metric is reported per regime.",
+        "source": "product-spec-v4.md \u00a7'Regime evaluation'; tech-arch-v4.md \u00a710 'Regime-conditional evaluation'."
+      },
+      {
+        "name": "CostCalibration",
+        "definition": "The paired fit of the Corwin-Schultz\u2192BBO spread scaler and the OLS slippage coefficient with heteroskedasticity-robust SEs; persisted to `artifacts/cost_calibration/{spread_scaler,kappa}.json`; required at simulator startup as one precondition. Merge SpreadCalibration+KappaCalibration\u2192CostCalibration stamped 2026-08-09 via P-003.",
+        "source": "tech-arch-v4.md \u00a711.1 + \u00a711.2."
+      },
+      {
+        "name": "Decision",
+        "definition": "The simulator's per-bar output \u2014 long, short, or flat, plus a size \u2014 computed from `edge = expected_return \u2212 spread_cost \u2212 kappa\u00b7size \u2212 lambda_risk\u00b7variance(p)` against a threshold and hysteresis.",
+        "source": "tech-arch-v4.md \u00a711.4 'Decision rule'."
+      },
+      {
+        "name": "Position",
+        "definition": "The currently held single-instrument state at a bar; the simulator holds at most one at a time and drops same-direction re-entries.",
+        "source": "tech-arch-v4.md \u00a711.4 'The simulator holds a single position at a time'."
+      },
+      {
+        "name": "Trade",
+        "definition": "A paired entry+exit position lifecycle; the unit reported in the per-trade P&L histogram and the hit-rate calculation.",
+        "source": "tech-arch-v4.md \u00a711.5 'per-trade P&L histogram with tail metrics'."
+      },
+      {
+        "name": "SimResult",
+        "definition": "A simulator run's output \u2014 trade ledger, equity curve, per-bar decisions, per-regime metrics \u2014 JSON-serializable and written to the logbook.",
+        "source": "tech-arch-v4.md \u00a715 'SimResult dataclass: trade ledger, equity curve, per-bar decisions, per-regime metrics'."
+      },
+      {
+        "name": "TestLook",
+        "definition": "One authorized use of the held-out 2024-01 through 2025-06 window; one line in `experiments/test_looks.log`; budget of three for the whole v1 enforced by a pre-commit hook.",
+        "source": "tech-arch-v4.md \u00a713 'Structural enforcement of the 3-look budget'; product-spec-v4.md \u00a7'Success gates for v1'."
+      },
+      {
+        "name": "Bucket",
+        "definition": "One of V discrete return classes (V \u2208 {16, 32, 64}); one row of BucketStats; outer buckets 0 and V-1 have infinite outer edges.",
+        "source": "tech-arch-v4.md \u00a77.1 'bucket 0 catches everything below the 0.5th percentile; bucket 31 catches everything above the 99.5th'.",
+        "stamped": "2026-08-09, Architect inline"
+      },
+      {
+        "name": "MetricSnapshot",
+        "definition": "The JSON file `artifacts/{run_id}/metrics.json` capturing a TrainingRun's final metrics at fixed keys with value ranges; usable as a regression fixture.",
+        "source": "TECHNIQUES.md \u00a72 Data science 'Metric snapshot as artifact' \u2014 kit-pattern adoption stamped explicitly per reviews/vocab-0.1-round-3-review.md finding 6.",
+        "stamped": "2026-08-09, Architect inline (kit-pattern adoption)"
+      },
+      {
+        "name": "Split",
+        "definition": "A named contiguous date range that partitions bars into train / validation / test; the load-bearing evaluation-side noun that the embargo of H bars and the test-look budget both guard.",
+        "source": "tech-arch-v4.md invariant #2 'Time-based splits with embargo'; \u00a79.2 `build_split_mask(...)`; product-spec-v4.md \u00a7'Training range'.",
+        "stamped": "2026-08-09, Architect inline"
+      },
+      {
+        "name": "Session",
+        "definition": "One regular-trading-hours span for the target instrument \u2014 the 26-bar interior between two SessionBoundary edges \u2014 with persistent attributes session_date, is_rth, regime_label. Dually classed at Layer 0 (entity) and Layer 3 (session stratum, framed by TRADING_SESSION_STARTED / TRADING_SESSION_ENDED). Step 4 re-encounters as a session-stratum entry; does not re-propose as new entity.",
+        "source": "tech-arch-v4.md \u00a75 'each session yields 26 bars'; \u00a76 'Session-boundary handling'; \u00a79.3 diagnostic timestamps. Dual-class note per reviews/vocab-0.1-round-3-review.md finding 6.",
+        "stamped": "2026-08-09, Architect inline (Layer 0 + Layer 3 dual class ratified)"
+      },
+      {
+        "name": "ExperimentConfig",
+        "definition": "A resolved YAML validated by Pydantic v2 at load time \u2014 a first-class artifact with a validator at the speaker's mouth. One config seeds one or more TrainingRuns via distinct seeds; TrainingRun carries a foreign-key reference `config_hash` to the ExperimentConfig.",
+        "source": "tech-arch-v4.md \u00a711.3 'A run without an explicit lambda_risk in its resolved config fails registration'; \u00a712 (Hydra + Pydantic v2). Standalone (one-to-many with TrainingRun) confirmed at inline stamp per reviews/vocab-0.1-round-3-review.md finding 6.",
+        "stamped": "2026-08-09, Architect inline (standalone confirmed; fold-into-TrainingRun rejected)"
+      },
+      {
+        "name": "Source",
+        "definition": "The vendor an IngestionCall targets \u2014 `mcp_av` (Alpha-Vantage-style MCP) or `polygon` (fallback for 15-min equity bars); recorded as the `source` field on every RawObservation and ChannelManifest entry. Runtime-grammar anchor for the fallback chain.",
+        "source": "tech-arch-v4.md \u00a74.2 `IngestionClient(source=Literal['mcp_av','polygon'])`; \u00a74.1 ChannelManifest 'source' key. Runtime-grammar rationale per reviews/vocab-0.1-layer-0-review.md finding 3.",
+        "stamped": "2026-08-09, Architect inline"
+      }
+    ],
+    "entity_implied_but_unnamed": {
+      "_note": "All six flags stamped 2026-08-09 by Architect. Promoted into entities[]. Layer 0 ratified: 31 entities, zero pending flags. Step 2 (Layer 1) opens.",
+      "flags": [],
+      "_stamped_promotions": [
+        "Bucket",
+        "MetricSnapshot",
+        "Split",
+        "Session",
+        "ExperimentConfig",
+        "Source"
+      ],
+      "_layer_6_forward_note": "IngestionClient, AlignmentJoin, TrainingLoop, Simulator \u2014 Layer-6-forward placeholders that lived here briefly in round 3 \u2014 sit in BLACKBOARD \u00a7 Deferred under the expanded P-015 entry, folded with Embedder/Bucketizer/Normalizer and SourceFallback for Step 7."
+    },
+    "removed_from_layer_0_inline": [
+      {
+        "name": "IngestionCall",
+        "reason": "An event, not an entity (PRINCIPLES.md Layer 0 def). Two Layer-1 NEW_TAG_PROPOSED shells open in Step 2: INGESTION_CALL_ISSUED, INGESTION_CALL_CACHED, ambient stratum with cadence invariant.",
+        "source": "reviews/vocab-0.1-layer-0-review.md finding 7"
+      },
+      {
+        "name": "Sprint",
+        "reason": "Category error. Layer 0 is 'the nouns the signals operate on'; Sprint is a noun of AGENTS.md, a working agreement, not an ontology source (commitment #6). Delete-and-move-on; no proposal type required pre-lock.",
+        "source": "reviews/vocab-0.1-layer-0-review.md finding 5"
+      },
+      {
+        "name": "Embedder (as Layer-0 entity)",
+        "reason": "Operator, not a noun. Its state lives inside Checkpoint, not a separate Layer-0 file. Moves to Layer 6 only; no Layer-0 replacement seat needed (unlike Bucketizer\u2192BucketStats and Normalizer\u2192NormalizerState, whose frozen files are Layer-0 nouns).",
+        "source": "reviews/vocab-0.1-layer-0-review.md finding 4"
+      },
+      {
+        "name": "Bucketizer (as Layer-0 entity)",
+        "reason": "Operator, not a noun. Layer-0 seat reassigned to BucketStats.",
+        "source": "reviews/vocab-0.1-layer-0-review.md finding 4"
+      },
+      {
+        "name": "Normalizer (as Layer-0 entity)",
+        "reason": "Operator, not a noun. Layer-0 seat reassigned to NormalizerState.",
+        "source": "reviews/vocab-0.1-layer-0-review.md finding 4"
+      },
+      {
+        "name": "SpreadCalibration",
+        "reason": "Merged into CostCalibration per P-003 in signals/proposals.json.",
+        "source": "reviews/vocab-0.1-layer-0-review.md finding 9"
+      },
+      {
+        "name": "KappaCalibration",
+        "reason": "Merged into CostCalibration per P-003 in signals/proposals.json.",
+        "source": "reviews/vocab-0.1-layer-0-review.md finding 9"
+      }
+    ],
+    "passive_entities_no_tags_this_pass": {
+      "_note": "BOOTSTRAP Step 2 halts on 'Layer-0 entity classified as load-bearing produces zero tags.' The entities below produce no tags in this pass; recorded here for Architect confirmation as passive (the identifier is referenced by other tags' payloads via foreign keys, not emitted about).",
+      "candidates": [
+        {
+          "entity": "Symbol",
+          "reason": "Identifier only. Referenced by target_symbol payload fields on many tags."
+        },
+        {
+          "entity": "Channel",
+          "reason": "Categorical grouping only. Referenced by channel payload fields."
+        },
+        {
+          "entity": "Split",
+          "reason": "Discrete date-range partition. Referenced by split payload field on METRIC_COMPUTED and other metric-side tags."
+        },
+        {
+          "entity": "Feature",
+          "reason": "Datum only; FEATURE_COMPUTED covers the lifecycle event."
+        },
+        {
+          "entity": "Window",
+          "reason": "Sampled unit; WINDOW_SAMPLED covers the lifecycle event."
+        },
+        {
+          "entity": "Model",
+          "reason": "Its lifecycle events are the TrainingRun tags; distinguished by run_kind. No standalone tags \u2014 no MODEL_INSTANTIATED because that fires per SESSION_INIT."
+        },
+        {
+          "entity": "Embedder (Layer-6 operator, Layer-0 referent via MarketStateToken)",
+          "reason": "Not a Layer-0 entity in this pass; noted for completeness."
+        }
+      ]
+    }
+  },
+  "categories": [
+    {
+      "name": "session",
+      "description": "Process-lifecycle events; SESSION_INIT and SESSION_COMPLETE bookend every run regardless of run_kind (probe / calibrate / train / eval / simulate)."
+    },
+    {
+      "name": "probe",
+      "description": "Phase 0 channel-availability probe; runs before any pipeline stage; writes ChannelManifest."
+    },
+    {
+      "name": "ingest",
+      "description": "Vendor fetching, cache, source fallback; writes RawObservation."
+    },
+    {
+      "name": "align",
+      "description": "As-of join on known_at against the 15-min UTC grid; writes AlignedRow."
+    },
+    {
+      "name": "trading_session",
+      "description": "Trading-session edges within an align or simulate run; TRADING_SESSION_STARTED / TRADING_SESSION_ENDED. Session-stratum per Layer 3 dual class."
+    },
+    {
+      "name": "feature",
+      "description": "Causal feature computation and normalizer fitting; writes NormalizerState."
+    },
+    {
+      "name": "tokenize",
+      "description": "Return bucketizer fitting and per-bar bucket assignment; writes BucketStats."
+    },
+    {
+      "name": "embed",
+      "description": "Market-state token emission via the Embedder operator."
+    },
+    {
+      "name": "config",
+      "description": "Experiment-config resolution and validation."
+    },
+    {
+      "name": "train",
+      "description": "Training loop: windowing, per-step, per-epoch, checkpoint writes."
+    },
+    {
+      "name": "evaluate",
+      "description": "Metric computation and metric-snapshot writes."
+    },
+    {
+      "name": "calibrate",
+      "description": "Cost calibration: spread-scaler and kappa fits."
+    },
+    {
+      "name": "simulate",
+      "description": "Bar walker, prediction emission, decision-making, position lifecycle, trade ledgering."
+    },
+    {
+      "name": "testlook",
+      "description": "Held-out test-set access accounting and budget enforcement."
+    }
+  ],
+  "tags": [
+    {
+      "name": "SESSION_INIT",
+      "category": "session",
+      "stratum": "event",
+      "note": "First signal in every capture. Declares process-lifecycle baseline: which run_kind (probe/calibrate/train/eval/simulate), which vocabulary version, which config, which git SHA, which data hash, which seed. Every subsequent signal interpretable relative to this row.",
+      "entity_refs": [
+        "TrainingRun",
+        "ExperimentConfig"
+      ],
+      "source": "sdd-kit-2/foundations/01-signal-driven-development.md \u00a7'SESSION_INIT pattern' + TECHNIQUES.md \u00a71 #9; tech-arch-v4.md \u00a79.3 (checkpoint metadata composition).",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "run_kind",
+          "type": "enum<probe|align|calibrate|train|eval|simulate>",
+          "required": true
+        },
+        {
+          "name": "vocab_version",
+          "type": "str",
+          "required": true,
+          "note": "semver of signals/N.M.json"
+        },
+        {
+          "name": "config_hash",
+          "type": "sha256",
+          "required": true,
+          "note": "hash of the resolved ExperimentConfig YAML"
+        },
+        {
+          "name": "git_sha",
+          "type": "str",
+          "required": true,
+          "note": "40-char hex"
+        },
+        {
+          "name": "data_hash",
+          "type": "sha256",
+          "required": true,
+          "note": "hash of the aligned parquet consumed"
+        },
+        {
+          "name": "seed",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "SESSION_COMPLETE",
+      "category": "session",
+      "stratum": "summary",
+      "note": "Last signal in every capture. Exit code 0 for success; non-zero per run_kind's contract.",
+      "entity_refs": [
+        "TrainingRun"
+      ],
+      "source": "TECHNIQUES.md \u00a71 #51 (always-emit summary pattern); wordcount example precedent.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "exit_code",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "elapsed_seconds",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "n_signals_emitted",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "CHANNEL_PROBED",
+      "category": "probe",
+      "stratum": "event",
+      "note": "One per channel per sample date during the Phase 0 probe. Records what the vendor actually returned vs what was requested.",
+      "entity_refs": [
+        "Channel",
+        "Symbol",
+        "Source",
+        "ChannelManifest"
+      ],
+      "source": "tech-arch-v4.md \u00a74.1 'Phase 0 channel-coverage probe'; product-spec-v4.md \u00a7'Phase 0 data-availability probe'.",
+      "typed_payload": [
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "sample_date",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "actual_frequency",
+          "type": "enum<1min|5min|15min|1h|1d|monthly>",
+          "required": true
+        },
+        {
+          "name": "earliest_timestamp",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "latest_timestamp",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "missing_fraction",
+          "type": "float",
+          "required": true,
+          "note": "0.0 to 1.0"
+        },
+        {
+          "name": "timezone",
+          "type": "str",
+          "required": true,
+          "note": "IANA tz name"
+        },
+        {
+          "name": "timestamp_semantics",
+          "type": "enum<bar_open|bar_close>",
+          "required": true
+        },
+        {
+          "name": "revision_behavior",
+          "type": "enum<immutable|revisable|restated>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "CHANNEL_COVERAGE_ASSESSED",
+      "category": "probe",
+      "stratum": "summary",
+      "note": "One per channel at end of probe. Verdict \u2208 {accepted, dropped, renegotiate}. Written to data/manifests/channel_coverage.json.",
+      "entity_refs": [
+        "ChannelManifest"
+      ],
+      "source": "tech-arch-v4.md \u00a74.1 'data/manifests/channel_coverage.json'.",
+      "typed_payload": [
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "overall_missing_fraction",
+          "type": "float",
+          "required": true,
+          "note": "0.0 to 1.0"
+        },
+        {
+          "name": "earliest_timestamp",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "latest_timestamp",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "verdict",
+          "type": "enum<accepted|dropped|renegotiate>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "CHANNEL_REJECTED",
+      "category": "probe",
+      "stratum": "incident",
+      "note": "Fires when a channel fails coverage (history too short, frequency wrong, semantics ambiguous, missing fraction above threshold). Reason \u2208 {history_too_short, frequency_mismatch, semantics_ambiguous, missing_fraction_high}.",
+      "entity_refs": [
+        "ChannelManifest"
+      ],
+      "source": "tech-arch-v4.md \u00a74.1 'Any channel with missing_fraction > 0.05 or earliest_timestamp later than 2015-06-15 is either dropped from v1 or added with an explicit note'.",
+      "typed_payload": [
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<history_too_short|frequency_mismatch|semantics_ambiguous|missing_fraction_high>",
+          "required": true
+        },
+        {
+          "name": "missing_fraction",
+          "type": "float",
+          "required": true,
+          "note": "0.0 to 1.0"
+        },
+        {
+          "name": "earliest_timestamp",
+          "type": "datetime_utc",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "INGESTION_CALL_ISSUED",
+      "category": "ingest",
+      "stratum": "ambient",
+      "note": "Fetcher issues a vendor call. Ambient stratum; fires per fetch attempt.",
+      "entity_refs": [
+        "Source",
+        "IngestionCall"
+      ],
+      "source": "tech-arch-v4.md \u00a74.2 'IngestionClient... Cache-first: hash(tool, params) \u2192 parquet key. Miss \u2192 network \u2192 write.'",
+      "typed_payload": [
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "tool",
+          "type": "str",
+          "required": true,
+          "note": "MCP tool name or Polygon endpoint"
+        },
+        {
+          "name": "params_hash",
+          "type": "sha256",
+          "required": true
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "INGESTION_CALL_CACHED",
+      "category": "ingest",
+      "stratum": "ambient",
+      "note": "Cache hit; no network. Ambient stratum. Paired with INGESTION_CALL_ISSUED \u2014 see IngestionCall entity split (round 4 note).",
+      "entity_refs": [
+        "Source"
+      ],
+      "source": "tech-arch-v4.md \u00a74.2 (cache path); paired with INGESTION_CALL_ISSUED per Layer 4 cadence invariant.",
+      "typed_payload": [
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "tool",
+          "type": "str",
+          "required": true,
+          "note": "MCP tool name or Polygon endpoint"
+        },
+        {
+          "name": "params_hash",
+          "type": "sha256",
+          "required": true
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "cache_key",
+          "type": "sha256",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "SOURCE_FALLBACK_TRIGGERED",
+      "category": "ingest",
+      "stratum": "incident",
+      "note": "Primary source (mcp_av) fails; fetcher falls back to polygon. Reason \u2208 {frequency_unavailable, history_gap, rate_limit_exhausted, response_invalid}.",
+      "entity_refs": [
+        "Source"
+      ],
+      "source": "tech-arch-v4.md \u00a74.2 'Fallback is Polygon.io for equities minute bars when the MCP's intraday coverage or history depth falls short.'",
+      "typed_payload": [
+        {
+          "name": "from_source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "to_source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<frequency_unavailable|history_gap|rate_limit_exhausted|response_invalid>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "RAW_OBSERVATION_WRITTEN",
+      "category": "ingest",
+      "stratum": "event",
+      "note": "One row (or partition) written to data/raw/. Carries the four-column schema keys.",
+      "entity_refs": [
+        "RawObservation",
+        "Source"
+      ],
+      "source": "tech-arch-v4.md \u00a75 'data/raw/{source}/{channel}/{symbol}/{yyyy-mm}.parquet'.",
+      "typed_payload": [
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "value_time",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "released_at",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "known_at",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "rows_written",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "revision_id",
+          "type": "int",
+          "required": false,
+          "note": "monotone within (source, channel, symbol, value_time)"
+        }
+      ]
+    },
+    {
+      "name": "REVISION_LANDED",
+      "category": "ingest",
+      "stratum": "event",
+      "note": "A restated value arrives for a series that carries revision_id. Alignment picks the latest revision whose known_at \u2264 t.",
+      "entity_refs": [
+        "Revision"
+      ],
+      "source": "tech-arch-v4.md \u00a74.3 'each revision writes a new row with a new revision_id'.",
+      "typed_payload": [
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "value_time",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "prior_revision_id",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "new_revision_id",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "ALIGNMENT_RUN_STARTED",
+      "category": "align",
+      "stratum": "event",
+      "note": "Alignment run begins. Reads channel_coverage manifest; fails if manifest is stale (tech-arch \u00a74.1).",
+      "entity_refs": [
+        "AlignedRow"
+      ],
+      "source": "tech-arch-v4.md \u00a74.1 'align.py opens channel_coverage.json, checks its generated_at timestamp against the channel-config mtime, and hard-fails if the probe is stale or missing.'",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "date_range_start",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "date_range_end",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "channels",
+          "type": "list<entity_ref<Channel>>",
+          "required": true
+        },
+        {
+          "name": "target_symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "ALIGNMENT_ROW_EMITTED",
+      "category": "align",
+      "stratum": "ambient",
+      "note": "One row emitted onto the 15-min UTC grid. Ambient \u2014 fires once per RTH bar. Payload minimal-but-complete per technique #6.",
+      "entity_refs": [
+        "AlignedRow"
+      ],
+      "source": "tech-arch-v4.md \u00a75 'one wide table on a canonical 15-minute UTC grid'.",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "missing_channels_count",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "ALIGNMENT_RUN_COMPLETED",
+      "category": "align",
+      "stratum": "summary",
+      "note": "Alignment done. Written to data/aligned/{run_id}.parquet. Always-emit summary per technique #51.",
+      "entity_refs": [
+        "AlignedRow"
+      ],
+      "source": "tech-arch-v4.md \u00a75 alignment output; TECHNIQUES.md \u00a71 #51 always-emit summary.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "total_rows",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "missing_fractions_per_channel",
+          "type": "dict<entity_ref<Channel>, float>",
+          "required": true
+        },
+        {
+          "name": "elapsed_seconds",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "output_path",
+          "type": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "AS_OF_JOIN_MISS",
+      "category": "align",
+      "stratum": "incident",
+      "note": "As-of join finds no eligible row for a channel at a grid timestamp. Reason \u2208 {no_history_yet, revision_conflict}. Missing-mask bit for the channel flips true.",
+      "entity_refs": [
+        "AlignedRow",
+        "Channel"
+      ],
+      "source": "tech-arch-v4.md \u00a75 'the as-of join carries the last known value forward and the matching missing_mask_* bit flips to True when no eligible row existed.'",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<no_history_yet|revision_conflict>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "TRADING_SESSION_STARTED",
+      "category": "trading_session",
+      "stratum": "event",
+      "note": "First RTH bar of a Session. Session-stratum edge per Layer 3.",
+      "entity_refs": [
+        "Session",
+        "SessionBoundary"
+      ],
+      "source": "tech-arch-v4.md \u00a75 'each session yields 26 bars'; \u00a76 Session-boundary handling.",
+      "typed_payload": [
+        {
+          "name": "session_date",
+          "type": "date_iso",
+          "required": true,
+          "note": "ET calendar day of the session"
+        },
+        {
+          "name": "first_bar_timestamp",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "target_symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "TRADING_SESSION_ENDED",
+      "category": "trading_session",
+      "stratum": "event",
+      "note": "Last RTH bar of a Session. bar_count expected 26 for a normal RTH day; different values flag holidays or halts.",
+      "entity_refs": [
+        "Session",
+        "SessionBoundary"
+      ],
+      "source": "tech-arch-v4.md \u00a75 (26-bar RTH default); anomaly on holidays and halts.",
+      "typed_payload": [
+        {
+          "name": "session_date",
+          "type": "date_iso",
+          "required": true,
+          "note": "ET calendar day of the session"
+        },
+        {
+          "name": "last_bar_timestamp",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "bar_count",
+          "type": "int",
+          "required": true,
+          "note": "26 for a normal RTH day; less on holidays or halts"
+        }
+      ]
+    },
+    {
+      "name": "FEATURE_COMPUTED",
+      "category": "feature",
+      "stratum": "ambient",
+      "note": "One feature computed at one bar for one channel. Ambient stratum with cadence invariant (one per feature per bar).",
+      "entity_refs": [
+        "Feature"
+      ],
+      "source": "tech-arch-v4.md \u00a76 'Every feature is computed with strictly causal utilities'.",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "feature_name",
+          "type": "str",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "NORMALIZER_FITTED",
+      "category": "feature",
+      "stratum": "summary",
+      "note": "Expanding-window z-score parameters frozen at end of training partition.",
+      "entity_refs": [
+        "NormalizerState"
+      ],
+      "source": "tech-arch-v4.md \u00a76 'Normalization \u2014 one scheme, committed'; product-spec-v4.md \u00a7'Feature normalization'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "feature_count",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "warmup_bars",
+          "type": "int",
+          "required": true,
+          "note": "typically 2000 per tech-arch \u00a76"
+        },
+        {
+          "name": "training_range_start",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "training_range_end",
+          "type": "date_iso",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "NORMALIZER_STATE_WRITTEN",
+      "category": "feature",
+      "stratum": "event",
+      "note": "artifacts/{run_id}/normalizers.pt saved. Validation and test read this file as-is (never recompute).",
+      "entity_refs": [
+        "NormalizerState"
+      ],
+      "source": "tech-arch-v4.md \u00a76 'artifacts/{run_id}/normalizers.pt'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "feature_count",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "sha256",
+          "type": "sha256",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "NORMALIZER_DRIFT_MEASURED",
+      "category": "feature",
+      "stratum": "summary",
+      "note": "Per (channel, feature_index): compares holdout vs training distribution of normalized feature via KS two-sample statistic + p-value. Product-spec line 251: 'plot the normalized-feature distribution on the holdout against training. Track it as a failure mode.'",
+      "entity_refs": [
+        "NormalizerState"
+      ],
+      "source": "product-spec-v4.md line 251; reviews/full-review-sprints-041-050.md \u00a73 item #8. Sprint 055 introduces this tag in v0.5.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind"
+        },
+        {
+          "name": "channel",
+          "type": "str",
+          "required": true,
+          "note": "channel__symbol key, e.g. target__SPY"
+        },
+        {
+          "name": "feature_index",
+          "type": "int",
+          "required": true,
+          "note": "0-based column index within the channel's F_c feature tensor"
+        },
+        {
+          "name": "train_mean",
+          "type": "float",
+          "required": true,
+          "note": "mean of the normalized feature on the training partition; should be ~0"
+        },
+        {
+          "name": "train_std",
+          "type": "float",
+          "required": true,
+          "note": "std of the normalized feature on the training partition; should be ~1"
+        },
+        {
+          "name": "holdout_mean",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "holdout_std",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "ks_statistic",
+          "type": "float",
+          "required": true,
+          "note": "Kolmogorov-Smirnov two-sample statistic; in [0, 1]. Small = similar distributions."
+        },
+        {
+          "name": "p_value",
+          "type": "float",
+          "required": true,
+          "note": "asymptotic Kolmogorov distribution p-value; small = distributions differ significantly."
+        }
+      ]
+    },
+    {
+      "name": "NORMALIZER_CHANNEL_UNDER_CLAMP",
+      "category": "feature",
+      "stratum": "incident",
+      "note": "Sprint 076 helper `warn_channels_under_clamp` promoted to a signal-side tag by Sprint 080. Fires per (channel, feature_index) where the fitted std sits below `std_clamp` on a channel not in EXPECTED_CONSTANT_CHANNELS. `fit_frozen_normalizer` emits one per hit before raising `NormalizerStdClampViolation` in strict mode; permits post-hoc audit via the trace of exactly which channels tripped the check.",
+      "entity_refs": [
+        "NormalizerState"
+      ],
+      "source": "reviews/full-review-sprints-051-073.md §11 first small finding; Sprint 076 (warn helper); Sprint 079 (strict fit-time check); Sprint 080 (this vocab bump).",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind"
+        },
+        {
+          "name": "channel",
+          "type": "str",
+          "required": true,
+          "note": "channel__symbol key, e.g. target__SPY"
+        },
+        {
+          "name": "feature_index",
+          "type": "int",
+          "required": true,
+          "note": "0-based column index within the channel's F_c feature tensor"
+        },
+        {
+          "name": "std_value",
+          "type": "float",
+          "required": true,
+          "note": "the fitted std that sits below the clamp; typically 0.0 for constant columns"
+        },
+        {
+          "name": "std_clamp",
+          "type": "float",
+          "required": true,
+          "note": "the FrozenNormalizer.std_clamp value the fit was run against; default 1e-8"
+        }
+      ]
+    },
+    {
+      "name": "TOKENIZED_ARTIFACT_WRITTEN",
+      "category": "tokenize",
+      "stratum": "summary",
+      "note": "Sprint 052 deferred a dedicated emit tag for the extended `.pt` write; Sprint 080 lands it. Fires once per `run_tokenizer_pt` call at the write-time boundary; carries the versioned path + sha256 (Sprint 078 storage discipline) + shape counts + Sprint 075 mask_semantics marker.",
+      "entity_refs": [],
+      "source": "tech-arch-v4.md §5 'extended tokenized artifact'; Sprint 052 (initial .pt write, deferred emit); Sprint 078 (versioned write); Sprint 080 (this vocab bump).",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier for the tokenize run; embedded in the versioned filename"
+        },
+        {
+          "name": "path",
+          "type": "path",
+          "required": true,
+          "note": "versioned .pt path, e.g. data/tokenized/tokens.<run_id>.pt"
+        },
+        {
+          "name": "sha256",
+          "type": "sha256",
+          "required": true,
+          "note": "Sprint 078 sha sidecar's hex digest; verifiable via `shasum -a 256`"
+        },
+        {
+          "name": "n_channels",
+          "type": "int",
+          "required": true,
+          "note": "number of per-channel feature tensors in `payload['features']`"
+        },
+        {
+          "name": "n_rows",
+          "type": "int",
+          "required": true,
+          "note": "row count on the canonical UTC grid (== targets.shape[0])"
+        },
+        {
+          "name": "mask_semantics",
+          "type": "str",
+          "required": true,
+          "note": "Sprint 075 version marker for the `mask` field's semantic; currently `target_valid_v075`"
+        },
+        {
+          "name": "normalized",
+          "type": "bool",
+          "required": true,
+          "note": "Sprint 084 (v0.7): True iff a frozen normalizer was applied during run_tokenizer_pt. Downstream trainers with fusion='mixer' refuse un-normalized artifacts because the mixer's random-init attention diverges on the un-normalized real corpus."
+        }
+      ]
+    },
+    {
+      "name": "BUCKETIZER_FITTED",
+      "category": "tokenize",
+      "stratum": "summary",
+      "note": "Return bucketizer boundaries frozen on the training partition. n_buckets \u2208 {16, 32, 64}.",
+      "entity_refs": [
+        "BucketStats"
+      ],
+      "source": "tech-arch-v4.md \u00a77.1 'Fit on target__{sym}__log_return / realized_vol_30 over training bars only.'",
+      "typed_payload": [
+        {
+          "name": "n_buckets",
+          "type": "enum<16|32|64>",
+          "required": true
+        },
+        {
+          "name": "training_range_start",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "training_range_end",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "train_partition_row_count",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "BUCKET_STATS_WRITTEN",
+      "category": "tokenize",
+      "stratum": "event",
+      "note": "artifacts/tokenizer/bucket_stats.json saved. Every downstream consumer reads from this file per frozen-artifact contract.",
+      "entity_refs": [
+        "BucketStats"
+      ],
+      "source": "tech-arch-v4.md \u00a77.1 'artifacts/tokenizer/bucket_stats.json'; product-spec-v4.md \u00a7'Frozen bucket artifacts'.",
+      "typed_payload": [
+        {
+          "name": "n_buckets",
+          "type": "enum<16|32|64>",
+          "required": true
+        },
+        {
+          "name": "path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "sha256",
+          "type": "sha256",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "BUCKET_ASSIGNED",
+      "category": "tokenize",
+      "stratum": "ambient",
+      "note": "One bar assigned its target bucket. Ambient \u2014 fires once per bar in training or eval.",
+      "entity_refs": [
+        "Bucket"
+      ],
+      "source": "tech-arch-v4.md \u00a77.1 ReturnBucketizer.encode() semantics.",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "bucket_id",
+          "type": "entity_ref<Bucket>",
+          "required": true,
+          "note": "integer bucket_id \u2208 [0, n_buckets)"
+        },
+        {
+          "name": "vol_normalized_return",
+          "type": "float",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "MARKET_STATE_TOKEN_EMITTED",
+      "category": "embed",
+      "stratum": "ambient",
+      "note": "One d_model vector emitted per bar by the Embedder. Ambient stratum; the temporal transformer attends over the sequence.",
+      "entity_refs": [
+        "MarketStateToken"
+      ],
+      "source": "tech-arch-v4.md \u00a77.2 'the single d_model-vector the transformer treats as position t'.",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "d_model",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "channel_count",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "CONFIG_RESOLVED",
+      "category": "config",
+      "stratum": "event",
+      "note": "Hydra composition + Pydantic v2 validation succeeds. lambda_risk and alpha_mag_weight are load-bearing (tech-arch \u00a711.3: absence fails registration).",
+      "entity_refs": [
+        "ExperimentConfig"
+      ],
+      "source": "tech-arch-v4.md \u00a711.3 'A run without an explicit lambda_risk in its resolved config fails registration'; \u00a712 (Hydra + Pydantic v2).",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "config_hash",
+          "type": "sha256",
+          "required": true,
+          "note": "hash of the resolved ExperimentConfig YAML"
+        },
+        {
+          "name": "git_sha",
+          "type": "str",
+          "required": true,
+          "note": "40-char hex"
+        },
+        {
+          "name": "resolved_at",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "lambda_risk",
+          "type": "float",
+          "required": true,
+          "note": "risk_penalty scale; presence is the SESSION_INIT gate"
+        },
+        {
+          "name": "alpha_mag_weight",
+          "type": "float",
+          "required": true,
+          "note": "magnitude-weight loss scale; 0.0 recovers unweighted CE"
+        },
+        {
+          "name": "target_symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "context_len",
+          "type": "enum<64|128|256|512>",
+          "required": true
+        },
+        {
+          "name": "n_buckets",
+          "type": "enum<16|32|64>",
+          "required": true
+        },
+        {
+          "name": "d_model",
+          "type": "enum<64|128|192|384|512>",
+          "required": true,
+          "note": "Sprint 084 (v0.7): model width. 64 is the pre-Sprint-073 default; 128/192/384/512 match configs/model/{xs,sm,md,lg}.json."
+        },
+        {
+          "name": "n_layers",
+          "type": "enum<4|6|8>",
+          "required": true,
+          "note": "Sprint 084 (v0.7): transformer blocks per configs/model/*.json."
+        },
+        {
+          "name": "n_heads",
+          "type": "enum<2|3|4|6|8>",
+          "required": true,
+          "note": "Sprint 084 (v0.7): attention heads. Spec: n_heads = d_model / 64 on the pre-registered sizes."
+        },
+        {
+          "name": "fusion",
+          "type": "enum<sum|mixer>",
+          "required": true,
+          "note": "Sprint 084 (v0.7): embedder shape per tech-arch § 10 ablation. 'sum' = Sprint 053 linear-sum; 'mixer' = Sprint 083 ChannelMixerEmbedder."
+        },
+        {
+          "name": "mixer_dim",
+          "type": "int",
+          "required": true,
+          "note": "Sprint 084 (v0.7): mixer hidden width. Ignored when fusion='sum'."
+        },
+        {
+          "name": "mixer_n_heads",
+          "type": "int",
+          "required": true,
+          "note": "Sprint 084 (v0.7): mixer attention heads. Ignored when fusion='sum'."
+        }
+      ]
+    },
+    {
+      "name": "CONFIG_VALIDATION_FAILED",
+      "category": "config",
+      "stratum": "incident",
+      "note": "Pydantic v2 rejects a resolved config. Load fails at speaker's mouth; no downstream signal fires.",
+      "entity_refs": [
+        "ExperimentConfig"
+      ],
+      "source": "tech-arch-v4.md \u00a711.3 (Pydantic validator at load) + WORKING_AGREEMENT.md \u00a7Vocabulary discipline (strict validator-extras posture).",
+      "typed_payload": [
+        {
+          "name": "config_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "missing_or_invalid_fields",
+          "type": "list<str>",
+          "required": true
+        },
+        {
+          "name": "error_message",
+          "type": "str",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "WINDOW_SAMPLED",
+      "category": "train",
+      "stratum": "ambient",
+      "note": "One training window drawn uniformly at random from valid starts. Ambient.",
+      "entity_refs": [
+        "Window"
+      ],
+      "source": "tech-arch-v4.md \u00a79.2 PriceSpaceDataset.__getitem__ 'random-window sampling: uniform over valid starts each draw'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "start_position",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "context_len",
+          "type": "enum<64|128|256|512>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "TRAINING_STEP_COMPLETED",
+      "category": "train",
+      "stratum": "ambient",
+      "note": "One optimizer step done. Ambient stratum with cadence invariant (every step).",
+      "entity_refs": [
+        "TrainingRun"
+      ],
+      "source": "tech-arch-v4.md \u00a79.3 'SDD trace logs training loss, LR, grad norm, and throughput every step'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "step",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "train_loss",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "lr",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "grad_norm",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "throughput_tokens_per_sec",
+          "type": "float",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "CHECKPOINT_WRITTEN",
+      "category": "train",
+      "stratum": "event",
+      "note": "Checkpoint saved at eval interval. Includes val metrics for selection; NLL alone gates keep-top-K.",
+      "entity_refs": [
+        "Checkpoint"
+      ],
+      "source": "tech-arch-v4.md \u00a79.3 'checkpoint {model, optimizer, scheduler, rng_states, config, git_sha, data_hash, step, val_metrics}'. + reviews/vocab-0.1-coverage-review.md findings 3,4,5",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "step",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "val_nll",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "val_ece",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "val_brier",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "val_rps",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "val_dir_acc",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "val_top1",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "val_top3",
+          "type": "float",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "EPOCH_COMPLETED",
+      "category": "train",
+      "stratum": "summary",
+      "note": "One epoch (fixed step budget) completed. Summary stratum.",
+      "entity_refs": [
+        "TrainingRun"
+      ],
+      "source": "tech-arch-v4.md \u00a79 'Epoch is defined by a fixed step budget'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "epoch",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "mean_train_loss",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "n_steps",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "METRIC_COMPUTED",
+      "category": "evaluate",
+      "stratum": "event",
+      "note": "One metric computed. Name \u2208 {nll, ece, brier, rps, dir_acc, top1, top3}. split \u2208 {train, val, test}. regime_label \u2208 {low_vix, mid_vix, high_vix, aggregate}. Fires per (metric, split, regime_label) tuple at each eval interval.",
+      "entity_refs": [
+        "Metric",
+        "Split",
+        "RegimeLabel"
+      ],
+      "source": "tech-arch-v4.md \u00a710 Prediction metrics + Regime-conditional evaluation.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "name",
+          "type": "enum<nll|ece|brier|rps|dir_acc|top1|top3>",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "split",
+          "type": "entity_ref<Split>",
+          "required": true
+        },
+        {
+          "name": "regime_label",
+          "type": "entity_ref<RegimeLabel>",
+          "required": true,
+          "note": "or aggregate marker"
+        }
+      ]
+    },
+    {
+      "name": "METRIC_SNAPSHOT_WRITTEN",
+      "category": "evaluate",
+      "stratum": "event",
+      "note": "artifacts/{run_id}/metrics.json saved. Usable as regression fixture (kit-pattern).",
+      "entity_refs": [
+        "MetricSnapshot"
+      ],
+      "source": "TECHNIQUES.md \u00a72 Data science 'Metric snapshot as artifact' (kit pattern).",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "split",
+          "type": "entity_ref<Split>",
+          "required": true
+        },
+        {
+          "name": "keys",
+          "type": "list<str>",
+          "required": true
+        },
+        {
+          "name": "sha256",
+          "type": "sha256",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "REGIME_LABELS_FROZEN",
+      "category": "evaluate",
+      "stratum": "event",
+      "note": "VIX terciles computed on the training window and frozen; applied unchanged to val and test.",
+      "entity_refs": [
+        "RegimeLabel"
+      ],
+      "source": "product-spec-v4.md \u00a7'Regime evaluation'; tech-arch-v4.md \u00a710 'VIX terciles computed on the training window'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "low_threshold",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "mid_threshold",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "training_range_start",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "training_range_end",
+          "type": "date_iso",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "COST_CALIBRATION_FITTED",
+      "category": "calibrate",
+      "stratum": "summary",
+      "note": "Both fits done (spread scaler + kappa). Kappa SEs are heteroskedasticity-robust.",
+      "entity_refs": [
+        "CostCalibration"
+      ],
+      "source": "tech-arch-v4.md \u00a711.1 + \u00a711.2.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "spread_scaler_slope",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "spread_scaler_intercept",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "kappa_point",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "kappa_se",
+          "type": "float",
+          "required": true,
+          "note": "heteroskedasticity-robust"
+        },
+        {
+          "name": "kappa_ci_low",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "kappa_ci_high",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "kappa_r2",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "n",
+          "type": "int",
+          "required": true,
+          "note": "regression sample size"
+        }
+      ]
+    },
+    {
+      "name": "SPREAD_SCALER_WRITTEN",
+      "category": "calibrate",
+      "stratum": "event",
+      "note": "artifacts/cost_calibration/spread_scaler.json saved.",
+      "entity_refs": [
+        "CostCalibration"
+      ],
+      "source": "tech-arch-v4.md \u00a711.1 'artifacts/cost_calibration/spread_scaler.json'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "sha256",
+          "type": "sha256",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "KAPPA_WRITTEN",
+      "category": "calibrate",
+      "stratum": "event",
+      "note": "artifacts/cost_calibration/kappa.json saved.",
+      "entity_refs": [
+        "CostCalibration"
+      ],
+      "source": "tech-arch-v4.md \u00a711.2 'artifacts/cost_calibration/kappa.json'.",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "sha256",
+          "type": "sha256",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "SIM_RUN_STARTED",
+      "category": "simulate",
+      "stratum": "event",
+      "note": "Simulator begins over a bar-by-bar walk. checkpoint_step names the model version; cost_calibration_run_id names the artifact set the cost model reads.",
+      "entity_refs": [
+        "SimResult",
+        "Checkpoint",
+        "CostCalibration"
+      ],
+      "source": "tech-arch-v4.md \u00a711 'A bar-by-bar walker over the test range'. + reviews/vocab-0.1-coverage-review.md findings 3,4,5",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "split",
+          "type": "entity_ref<Split>",
+          "required": true
+        },
+        {
+          "name": "date_range_start",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "date_range_end",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "checkpoint_step",
+          "type": "int",
+          "required": true,
+          "note": "which checkpoint the sim reads"
+        },
+        {
+          "name": "checkpoint_run_id",
+          "type": "str",
+          "required": true,
+          "note": "run_id of the training run that produced the checkpoint; distinct from the sim's own run_id"
+        },
+        {
+          "name": "cost_calibration_run_id",
+          "type": "str",
+          "required": true,
+          "note": "run_id of the calibration whose artifacts the sim reads"
+        }
+      ]
+    },
+    {
+      "name": "BAR_PROCESSED",
+      "category": "simulate",
+      "stratum": "ambient",
+      "note": "One bar processed by the walker. Ambient; the base rate of the sim's iteration.",
+      "entity_refs": [
+        "Bar"
+      ],
+      "source": "tech-arch-v4.md \u00a711 'At each bar t the walker assembles the state vector'.",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        }
+      ]
+    },
+    {
+      "name": "PREDICTION_EMITTED",
+      "category": "simulate",
+      "stratum": "ambient",
+      "note": "Model output at a bar. Payload carries the derived scalars the decision rule consumes.",
+      "entity_refs": [
+        "Prediction"
+      ],
+      "source": "tech-arch-v4.md \u00a711 'reads logits[:, -1, :], softmaxes to p[t]... derives expected_vn_return, expected_return, p_up, sharpness'.",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "expected_vn_return",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "expected_return",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "p_up",
+          "type": "float",
+          "required": true,
+          "note": "0.0 to 1.0"
+        },
+        {
+          "name": "sharpness",
+          "type": "float",
+          "required": true,
+          "note": "1 - entropy(p)/log(V)"
+        },
+        {
+          "name": "entropy",
+          "type": "float",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "DECISION_MADE",
+      "category": "simulate",
+      "stratum": "event",
+      "note": "Policy output at a bar. Direction \u2208 {long, short, flat}. Reason \u2208 {edge_above_threshold, edge_below_threshold, hysteresis_hold, position_held}.",
+      "entity_refs": [
+        "Decision"
+      ],
+      "source": "tech-arch-v4.md \u00a711.4 'Decision rule'. + reviews/vocab-0.1-coverage-review.md findings 3,4,5",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "direction",
+          "type": "enum<long|short|flat>",
+          "required": true
+        },
+        {
+          "name": "size",
+          "type": "float",
+          "required": true,
+          "note": "signed position size in units of $1M target"
+        },
+        {
+          "name": "edge",
+          "type": "float",
+          "required": true,
+          "note": "in vol-normalized units"
+        },
+        {
+          "name": "threshold",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<edge_above_threshold|edge_below_threshold|hysteresis_hold|position_held>",
+          "required": true
+        },
+        {
+          "name": "effective_threshold",
+          "type": "float",
+          "required": true,
+          "note": "threshold * (1 + hysteresis) when the decision would flip; equals threshold otherwise. The value the decision actually compared |edge| against."
+        }
+      ]
+    },
+    {
+      "name": "POSITION_OPENED",
+      "category": "simulate",
+      "stratum": "event",
+      "note": "Position entry printed at next bar's open per \u00a711.4.",
+      "entity_refs": [
+        "Position"
+      ],
+      "source": "tech-arch-v4.md \u00a711.4 'Entries and exits print at the next bar's open'. + reviews/vocab-0.1-coverage-review.md findings 3,4,5",
+      "typed_payload": [
+        {
+          "name": "decision_bar_ts",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "bar T when the DECISION_MADE fired"
+        },
+        {
+          "name": "fill_bar_ts",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "bar T+1 whose open produced entry_price"
+        },
+        {
+          "name": "direction",
+          "type": "enum<long|short|flat>",
+          "required": true
+        },
+        {
+          "name": "size",
+          "type": "float",
+          "required": true,
+          "note": "signed position size in units of $1M target"
+        },
+        {
+          "name": "entry_price",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "target_symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "POSITION_CLOSED",
+      "category": "simulate",
+      "stratum": "event",
+      "note": "Position exit printed at next bar's open. pnl_net = pnl_gross \u2212 2*spread_cost \u2212 kappa*size.",
+      "entity_refs": [
+        "Position"
+      ],
+      "source": "tech-arch-v4.md \u00a711.4 + \u00a711.5 metrics attach to closed positions. + reviews/vocab-0.1-coverage-review.md findings 3,4,5",
+      "typed_payload": [
+        {
+          "name": "decision_bar_ts",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "fill_bar_ts",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "direction",
+          "type": "enum<long|short|flat>",
+          "required": true
+        },
+        {
+          "name": "size",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "exit_price",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "pnl_gross",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "pnl_net",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "hold_duration_bars",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "close_kind",
+          "type": "enum<normal|sim_range_end|session_boundary_forced_close>",
+          "required": true,
+          "note": "normal for mid-sim exits; sim_range_end for the last-bar forced close (no next bar to fill on); session_boundary_forced_close for policies that flatten overnight"
+        }
+      ]
+    },
+    {
+      "name": "TRADE_LEDGERED",
+      "category": "simulate",
+      "stratum": "event",
+      "note": "Trade booked to the SimResult ledger. One per closed position.",
+      "entity_refs": [
+        "Trade"
+      ],
+      "source": "tech-arch-v4.md \u00a711.5 'per-trade P&L histogram with tail metrics'; \u00a715 SimResult 'trade ledger'.",
+      "typed_payload": [
+        {
+          "name": "trade_id",
+          "type": "entity_ref<Trade>",
+          "required": true
+        },
+        {
+          "name": "entry_ts",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "exit_ts",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "direction",
+          "type": "enum<long|short|flat>",
+          "required": true
+        },
+        {
+          "name": "size",
+          "type": "float",
+          "required": true,
+          "note": "signed position size in units of $1M target"
+        },
+        {
+          "name": "pnl_net",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "cost_spread",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "cost_slippage",
+          "type": "float",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "SIGNAL_DROPPED",
+      "category": "simulate",
+      "stratum": "incident",
+      "note": "Same-direction re-entry dropped, or opposite-direction flip below hysteresis threshold. Reason \u2208 {same_direction_position_held, hysteresis_below_flip_threshold}.",
+      "entity_refs": [
+        "Decision",
+        "Position"
+      ],
+      "source": "tech-arch-v4.md \u00a711.4 'The simulator holds a single position at a time. Same-direction re-entries are dropped.'",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true,
+          "note": "the 15-min UTC grid t"
+        },
+        {
+          "name": "dropped_reason",
+          "type": "enum<same_direction_position_held|hysteresis_below_flip_threshold>",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "SIM_RUN_COMPLETED",
+      "category": "simulate",
+      "stratum": "summary",
+      "note": "Sim run done. sharpe_se is the standard error attached to the point estimate; block_bootstrap_positive_fraction is the \u226570% gate.",
+      "entity_refs": [
+        "SimResult"
+      ],
+      "source": "tech-arch-v4.md \u00a711.5 'Sharpe is reported with its standard error... block bootstrap over 18 non-overlapping monthly blocks'. + reviews/vocab-0.1-coverage-review.md findings 3,4,5",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "n_trades",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "sharpe_point",
+          "type": "float",
+          "required": true,
+          "note": "annualized"
+        },
+        {
+          "name": "sharpe_se",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "block_bootstrap_positive_fraction",
+          "type": "float",
+          "required": true,
+          "note": "0.0 to 1.0; gate is >= 0.70"
+        },
+        {
+          "name": "max_drawdown",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "time_to_recovery_bars",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "implied_capacity_at_this_size_usd",
+          "type": "float",
+          "required": true,
+          "note": "the single-run implied capacity at the sweep's current size_usd; the multi-run answer lives in CAPACITY_SWEEP_COMPLETED"
+        }
+      ]
+    },
+    {
+      "name": "TEST_LOOK_REGISTERED",
+      "category": "testlook",
+      "stratum": "event",
+      "note": "One authorized use of the held-out set logged to experiments/test_looks.log. Requires the [test-look] token in the commit per \u00a713.",
+      "entity_refs": [
+        "TestLook"
+      ],
+      "source": "tech-arch-v4.md \u00a713 'Structural enforcement of the 3-look budget'.",
+      "typed_payload": [
+        {
+          "name": "date",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "opaque identifier per run kind; not a strict entity_ref because probe/calibrate/train/eval/simulate all mint their own; Step-6 may unify"
+        },
+        {
+          "name": "reason",
+          "type": "str",
+          "required": true
+        },
+        {
+          "name": "commit_sha",
+          "type": "str",
+          "required": true,
+          "note": "40-char hex; the commit carrying the [test-look] token"
+        },
+        {
+          "name": "looks_used",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "looks_remaining",
+          "type": "int",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "TEST_LOOK_BUDGET_EXHAUSTED",
+      "category": "testlook",
+      "stratum": "incident",
+      "note": "Attempt to open a look beyond the three-budget. Pre-commit hook rejects; sprint halts with test_look_budget_exhausted.",
+      "entity_refs": [
+        "TestLook"
+      ],
+      "source": "WORKING_AGREEMENT.md \u00a7Project-specific halt conditions 'test_look_budget_exhausted'; tech-arch-v4.md \u00a713.",
+      "typed_payload": [
+        {
+          "name": "existing_looks",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "attempted_run_id",
+          "type": "str",
+          "required": true
+        },
+        {
+          "name": "commit_sha",
+          "type": "str",
+          "required": true,
+          "note": "40-char hex; the commit carrying the [test-look] token"
+        }
+      ]
+    },
+    {
+      "name": "TRAINING_DIVERGED",
+      "category": "train",
+      "stratum": "incident",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true
+        },
+        {
+          "name": "step",
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "train_loss",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "grad_norm",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "val_nll_at_last_eval",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<nan_loss|gradient_explosion|val_metric_diverged>",
+          "required": true,
+          "note": "loss_plateau removed round 5 \u2014 tech-arch \u00a79 defines the epoch as a fixed step budget and does not specify plateau-halting. Re-add if a WORKING_AGREEMENT decision authorises early-stop-on-plateau."
+        }
+      ],
+      "note": "Fires when the training loop detects NaN loss, gradient explosion (grad_norm > clip*10 sustained), loss plateau (val NLL not improving for K evals), or a validation-metric divergence. Product-spec gate #1 ('Training completes without NaN, divergence, or gradient explosion') has a signal home now \u2014 a Report reader no longer has to grep for isnan(train_loss) inside TRAINING_STEP_COMPLETED.",
+      "source": "product-spec-v4.md \u00a7'Success gates for v1' gate 1; reviews/vocab-0.1-coverage-review.md finding 1"
+    },
+    {
+      "name": "MANIFEST_STALE_OR_MISSING",
+      "category": "align",
+      "stratum": "incident",
+      "typed_payload": [
+        {
+          "name": "manifest_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "manifest_generated_at",
+          "type": "datetime_utc",
+          "required": false,
+          "note": "null if reason=missing"
+        },
+        {
+          "name": "channel_config_mtime",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<stale|missing|unparseable>",
+          "required": true
+        }
+      ],
+      "note": "align.py's Phase-0 gate. Fires when data/manifests/channel_coverage.json is stale relative to the channel config, missing outright, or unparseable. Distinct from CONFIG_VALIDATION_FAILED (Pydantic side).",
+      "source": "tech-arch-v4.md \u00a74.1 'align.py opens channel_coverage.json ... and hard-fails if the probe is stale or missing'; reviews/vocab-0.1-coverage-review.md finding 1"
+    },
+    {
+      "name": "BUCKET_FREQUENCY_DRIFT_MEASURED",
+      "category": "evaluate",
+      "stratum": "summary",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true
+        },
+        {
+          "name": "split",
+          "type": "entity_ref<Split>",
+          "required": true
+        },
+        {
+          "name": "train_frequency_by_bucket",
+          "type": "list<float>",
+          "required": true
+        },
+        {
+          "name": "realized_frequency_by_bucket",
+          "type": "list<float>",
+          "required": true
+        },
+        {
+          "name": "max_absolute_deviation",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "outer_bucket_ratio",
+          "type": "float",
+          "required": true,
+          "note": "realized(bucket 0 + bucket V-1) / train(bucket 0 + bucket V-1)"
+        }
+      ],
+      "note": "The pre-registered tail-shape drift diagnostic (product-spec \u00a7'Regime evaluation' + tech-arch \u00a710). Runs on val and on test at final eval. Fires once per (run_id, split). SDD trace carries the histogram; the trace carries the summary vector.",
+      "source": "product-spec-v4.md \u00a7'Regime evaluation'; tech-arch-v4.md \u00a710 'bucket-boundary drift diagnostic'; reviews/vocab-0.1-coverage-review.md finding 1"
+    },
+    {
+      "name": "SENSITIVITY_PLOT_GENERATED",
+      "category": "simulate",
+      "stratum": "summary",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true
+        },
+        {
+          "name": "kappa_multipliers",
+          "type": "list<float>",
+          "required": true,
+          "note": "e.g. [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]"
+        },
+        {
+          "name": "sharpe_by_multiplier",
+          "type": "list<float>",
+          "required": true
+        },
+        {
+          "name": "min_sharpe",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "max_sharpe",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "sharpe_crosses_zero_in_range",
+          "type": "bool",
+          "required": true,
+          "note": "if True, Sharpe crosses zero somewhere in [0.5\u00d7, 2\u00d7] and the point estimate is not robust"
+        }
+      ],
+      "note": "The pre-registered Sharpe-vs-kappa sensitivity plot (product-spec \u00a7'Success gates for v1'). Fires once per held-out sim run. Layer-7 gate: sharpe_crosses_zero_in_range MUST be False for a robust reported number.",
+      "source": "product-spec-v4.md \u00a7'Success gates for v1' sensitivity plot; tech-arch-v4.md \u00a711.2; reviews/vocab-0.1-coverage-review.md finding 1"
+    },
+    {
+      "name": "INGESTION_CALL_RETRIED",
+      "category": "ingest",
+      "stratum": "incident",
+      "typed_payload": [
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "tool",
+          "type": "str",
+          "required": true
+        },
+        {
+          "name": "attempt",
+          "type": "int",
+          "required": true,
+          "note": "1-based; attempt N means N prior attempts failed"
+        },
+        {
+          "name": "status_code",
+          "type": "int",
+          "required": false,
+          "note": "HTTP status if applicable"
+        },
+        {
+          "name": "backoff_seconds",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<rate_limit|server_error|timeout|response_invalid>",
+          "required": true
+        }
+      ],
+      "note": "IngestionClient's retry-with-backoff on 429/5xx (tech-arch \u00a74.2). Distinguishes three normal INGESTION_CALL_ISSUED events from three-retries-before-success in the trace.",
+      "source": "tech-arch-v4.md \u00a74.2 'retry-with-backoff on 429/5xx'; reviews/vocab-0.1-coverage-review.md finding 2"
+    },
+    {
+      "name": "FEATURE_COMPUTATION_FAILED",
+      "category": "feature",
+      "stratum": "incident",
+      "typed_payload": [
+        {
+          "name": "timestamp",
+          "type": "datetime_utc",
+          "required": true
+        },
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "feature_name",
+          "type": "str",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "enum<insufficient_history|divide_by_zero|nan_input|downstream_error>",
+          "required": true
+        }
+      ],
+      "note": "A rolling window with too few valid rows, a spread_proxy denominator collapse, or a divide-by-zero on realized_vol_30 in a flat market yields NaN. Without this tag, failures propagate silently to the tokenized tensor and surface at training as loss-NaN \u2014 attributed to the wrong origin.",
+      "source": "tech-arch-v4.md \u00a76 (feature computation); reviews/vocab-0.1-coverage-review.md finding 2"
+    },
+    {
+      "name": "CAPACITY_SWEEP_COMPLETED",
+      "category": "simulate",
+      "stratum": "summary",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "the sweep-driving run's id"
+        },
+        {
+          "name": "points",
+          "type": "list<struct<size_usd:float, sharpe:float, sharpe_se:float>>",
+          "required": true,
+          "note": "one entry per size the sweep tested"
+        },
+        {
+          "name": "capacity_usd",
+          "type": "float",
+          "required": true,
+          "note": "the largest size_usd at which sharpe stayed positive"
+        },
+        {
+          "name": "sharpe_at_capacity",
+          "type": "float",
+          "required": true
+        }
+      ],
+      "note": "Capacity is a multi-run output \u2014 a sweep of per-size simulations. This tag holds the sweep result; per-size runs each fire their own SIM_RUN_COMPLETED with implied_capacity_at_this_size_usd (renamed from the round-11 overloaded capacity_usd).",
+      "source": "tech-arch-v4.md \u00a711.5 capacity sweep; reviews/vocab-0.1-coverage-review.md finding 5"
+    },
+    {
+      "name": "BASELINE_COMPARISON_ASSESSED",
+      "category": "evaluate",
+      "stratum": "summary",
+      "typed_payload": [
+        {
+          "name": "run_id",
+          "type": "str",
+          "required": true,
+          "note": "the transformer run being compared"
+        },
+        {
+          "name": "baseline_kind",
+          "type": "enum<linear|mlp|gru_tcn|target_only|magnitude_weighted>",
+          "required": true
+        },
+        {
+          "name": "baseline_run_id",
+          "type": "str",
+          "required": true,
+          "note": "the baseline run providing the comparison value"
+        },
+        {
+          "name": "transformer_val_nll",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "baseline_val_nll",
+          "type": "float",
+          "required": true
+        },
+        {
+          "name": "delta_pct",
+          "type": "float",
+          "required": true,
+          "note": "(baseline_val_nll - transformer_val_nll) / baseline_val_nll * 100; positive means transformer is better"
+        },
+        {
+          "name": "required_delta_pct",
+          "type": "float",
+          "required": true,
+          "note": "10 for linear, 5 for gru_tcn and target_only, per product-spec gates"
+        },
+        {
+          "name": "meets_gate",
+          "type": "bool",
+          "required": true
+        }
+      ],
+      "note": "Cross-run baseline comparison. Fires once per (transformer_run, baseline_kind) after both runs' val NLL are computed. Layer 7 gates: linear \u226510% lower, gru_tcn \u22655% lower, target_only \u22655% lower.",
+      "source": "product-spec-v4.md \u00a7'Success gates for v1'; reviews/vocab-0.1-round-5-review.md finding 3"
+    },
+    {
+      "name": "CHANNEL_FETCH_FAILED",
+      "category": "probe",
+      "stratum": "incident",
+      "note": "Fires when a fetcher raises during a probe attempt for a (channel, symbol, sample_date). No observation was made; no CHANNEL_PROBED fires for that date. The channel-level CHANNEL_COVERAGE_ASSESSED still closes with whatever aggregate the successful probes support (or verdict=dropped if none succeeded \u2014 enforced by the follow-on halt if the vocabulary needs an optional-timestamp path for zero-observation channels).",
+      "entity_refs": [
+        "ChannelManifest"
+      ],
+      "source": "Sprint 020 live smoke against Alpha-Vantage: TIME_SERIES_INTRADAY refused ^VIX with 'Invalid API call'. The v0.2 vocabulary had no signal shape for 'we tried and the vendor said no'; Sprint 020 shipped a fabricated CHANNEL_PROBED via a fill-value shim, which the Architect flagged as a code failure (2026-08-11 correction). Sprint 022 adds this tag; Sprint 023 rewires the probe to emit it.",
+      "typed_payload": [
+        {
+          "name": "channel",
+          "type": "entity_ref<Channel>",
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "entity_ref<Symbol>",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "entity_ref<Source>",
+          "required": true
+        },
+        {
+          "name": "sample_date",
+          "type": "date_iso",
+          "required": true
+        },
+        {
+          "name": "exception_class",
+          "type": "str",
+          "required": true,
+          "note": "Python type name, e.g. 'AlphaVantageResponseError'"
+        },
+        {
+          "name": "error_message",
+          "type": "str",
+          "required": true,
+          "note": "Vendor error string, verbatim; truncate to 1000 chars at emit site if needed"
+        }
+      ]
+    }
+  ],
+  "sessions": {
+    "_layer": "Layer 3 \u2014 Session. Bounded event streams. Four strata declared. process_session is the outermost; align_run and sim_run nest within it when run_kind matches; trading_session nests within align_run and sim_run.",
+    "framing_inferred": [
+      "process_session",
+      "align_run",
+      "sim_run"
+    ],
+    "framing_from_docs": [
+      "trading_session"
+    ],
+    "strata": [
+      {
+        "name": "process_session",
+        "boundary_open": "SESSION_INIT",
+        "boundary_close": "SESSION_COMPLETE",
+        "persistent_attributes": [
+          "run_id",
+          "run_kind",
+          "vocab_version",
+          "config_hash",
+          "git_sha",
+          "data_hash",
+          "seed"
+        ],
+        "frames_tags": "every tag in the vocabulary except SESSION_INIT and SESSION_COMPLETE themselves",
+        "note": "Outermost session. Every capture opens with SESSION_INIT and closes with SESSION_COMPLETE. The run_kind field distinguishes probe / align / calibrate / train / eval / simulate lifecycles."
+      },
+      {
+        "name": "align_run",
+        "parent": "process_session",
+        "opens_when": "process_session.run_kind == 'align'",
+        "boundary_open": "ALIGNMENT_RUN_STARTED",
+        "boundary_close": "ALIGNMENT_RUN_COMPLETED",
+        "persistent_attributes": [
+          "run_id",
+          "date_range_start",
+          "date_range_end",
+          "channels",
+          "target_symbol"
+        ],
+        "frames_tags": [
+          "ALIGNMENT_ROW_EMITTED",
+          "AS_OF_JOIN_MISS",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED"
+        ],
+        "note": "Nested domain-lifecycle session inside process_session when run_kind=align. Carries alignment-specific persistent attributes so downstream reads don't re-inspect SESSION_INIT."
+      },
+      {
+        "name": "sim_run",
+        "parent": "process_session",
+        "opens_when": "process_session.run_kind == 'simulate'",
+        "boundary_open": "SIM_RUN_STARTED",
+        "boundary_close": "SIM_RUN_COMPLETED",
+        "persistent_attributes": [
+          "run_id",
+          "split",
+          "date_range_start",
+          "date_range_end",
+          "checkpoint_step",
+          "cost_calibration_run_id"
+        ],
+        "frames_tags": [
+          "BAR_PROCESSED",
+          "PREDICTION_EMITTED",
+          "DECISION_MADE",
+          "POSITION_OPENED",
+          "POSITION_CLOSED",
+          "TRADE_LEDGERED",
+          "SIGNAL_DROPPED",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED"
+        ],
+        "note": "Nested domain-lifecycle session inside process_session when run_kind=simulate. Carries the simulator's model-and-cost-model bindings as persistent attributes."
+      },
+      {
+        "name": "trading_session",
+        "parent": "align_run OR sim_run",
+        "opens_when": "the RTH session opens for the target instrument during align_run or sim_run iteration",
+        "boundary_open": "TRADING_SESSION_STARTED",
+        "boundary_close": "TRADING_SESSION_ENDED",
+        "persistent_attributes": [
+          "session_date",
+          "target_symbol",
+          "first_bar_timestamp"
+        ],
+        "frames_tags": {
+          "under_align_run": [
+            "ALIGNMENT_ROW_EMITTED",
+            "AS_OF_JOIN_MISS"
+          ],
+          "under_sim_run": [
+            "BAR_PROCESSED",
+            "PREDICTION_EMITTED",
+            "DECISION_MADE",
+            "POSITION_OPENED",
+            "POSITION_CLOSED",
+            "TRADE_LEDGERED",
+            "SIGNAL_DROPPED"
+          ]
+        },
+        "note": "The RTH trading session for the target instrument \u2014 26 bars at 15-min RTH default. Session entity is dually classed at Layer 0 (entity) and Layer 3 (session stratum) per stamp-time ratification; this is the Layer-3 face of that duality."
+      }
+    ],
+    "_halt_check_step_4": "Step 4 halts on: (a) no boundary-open candidates \u2014 false, four defined; (b) boundary-open frames no tags \u2014 false, every stratum frames at least two tags (process_session frames 44).",
+    "_step_1_backpropagation": {
+      "SESSION_INIT.payload.run_kind": "extended from enum<probe|calibrate|train|eval|simulate> to enum<probe|align|calibrate|train|eval|simulate> \u2014 Layer 3 surfaced the missing 'align' value when align_run needed a parent condition. Layer-1 revision per BOOTSTRAP \u00a7'Dependency structure' loop-back discipline."
+    }
+  },
+  "temporal_invariants": {
+    "_layer": "Layer 4 \u2014 Temporal. Timing invariants that constrain WHEN tags fire relative to each other. Every ambient-stratum tag carries a cadence invariant per BOOTSTRAP Step 5 halt condition.",
+    "invariants": [
+      {
+        "kind": "cadence",
+        "tag": "INGESTION_CALL_ISSUED",
+        "rate": "\u2264 75 per minute per Source",
+        "source": "tech-arch-v4.md \u00a74.2 'token-bucket rate limiter (75 req/min default)'",
+        "check": "count(INGESTION_CALL_ISSUED where source=X during any 60s window) \u2264 75"
+      },
+      {
+        "kind": "cadence",
+        "tag": "INGESTION_CALL_CACHED",
+        "rate": "unbounded (in-memory cache)",
+        "source": "tech-arch-v4.md \u00a74.2 'Cache-first: hash(tool, params) \u2192 parquet key. Miss \u2192 network \u2192 write.'",
+        "check": "no rate cap; may burst"
+      },
+      {
+        "kind": "cadence",
+        "tag": "ALIGNMENT_ROW_EMITTED",
+        "rate": "one per RTH 15-min bar within align_run",
+        "source": "tech-arch-v4.md \u00a75 'each session yields 26 bars (6.5 hours \u00d7 4 bars/hour)'",
+        "check": "for each session_date, count(ALIGNMENT_ROW_EMITTED where session=that_date) == bar_count"
+      },
+      {
+        "kind": "cadence",
+        "tag": "FEATURE_COMPUTED",
+        "rate": "one per (feature_name, channel, timestamp) tuple",
+        "source": "tech-arch-v4.md \u00a76 'Every feature is computed with strictly causal utilities'",
+        "check": "for each (feature_name, channel, timestamp), count == 1"
+      },
+      {
+        "kind": "cadence",
+        "tag": "BUCKET_ASSIGNED",
+        "rate": "one per bar in training or eval range",
+        "source": "tech-arch-v4.md \u00a77.1 ReturnBucketizer.encode() semantics",
+        "check": "for each timestamp in target range, count(BUCKET_ASSIGNED) == 1"
+      },
+      {
+        "kind": "cadence",
+        "tag": "MARKET_STATE_TOKEN_EMITTED",
+        "rate": "one per bar per process_session where run_kind \u2208 {train, eval, simulate}",
+        "source": "tech-arch-v4.md \u00a77.2",
+        "check": "for each timestamp in the active window, count == 1"
+      },
+      {
+        "kind": "cadence",
+        "tag": "WINDOW_SAMPLED",
+        "rate": "one per training step (samples_per_epoch draws per epoch)",
+        "source": "tech-arch-v4.md \u00a79.2 PriceSpaceDataset random-window sampling",
+        "check": "count(WINDOW_SAMPLED) == count(TRAINING_STEP_COMPLETED) within an epoch"
+      },
+      {
+        "kind": "cadence",
+        "tag": "TRAINING_STEP_COMPLETED",
+        "rate": "one per optimizer step",
+        "source": "tech-arch-v4.md \u00a79.3 'SDD trace logs training loss, LR, grad norm, and throughput every step'",
+        "check": "monotone step field; no gaps"
+      },
+      {
+        "kind": "cadence",
+        "tag": "BAR_PROCESSED",
+        "rate": "one per RTH bar in sim_run",
+        "source": "tech-arch-v4.md \u00a711 'A bar-by-bar walker over the test range'",
+        "check": "for each bar in [date_range_start, date_range_end], count == 1"
+      },
+      {
+        "kind": "cadence",
+        "tag": "PREDICTION_EMITTED",
+        "rate": "one per BAR_PROCESSED",
+        "source": "tech-arch-v4.md \u00a711 'At each bar t the walker... reads logits[:, -1, :], softmaxes'",
+        "check": "count(PREDICTION_EMITTED) == count(BAR_PROCESSED) within a sim_run"
+      },
+      {
+        "kind": "window",
+        "from": "POSITION_OPENED",
+        "to": "POSITION_CLOSED",
+        "window": "must close before SIM_RUN_COMPLETED",
+        "source": "tech-arch-v4.md \u00a711.4 'The simulator holds a single position at a time'",
+        "check": "no unclosed POSITION_OPENED at SIM_RUN_COMPLETED time"
+      },
+      {
+        "kind": "window",
+        "from": "TRADING_SESSION_STARTED",
+        "to": "TRADING_SESSION_ENDED",
+        "window": "\u2264 1 calendar day",
+        "source": "tech-arch-v4.md \u00a75 RTH session length",
+        "check": "for each (session_date), time(TRADING_SESSION_ENDED) - time(TRADING_SESSION_STARTED) < 24h"
+      },
+      {
+        "kind": "window",
+        "from": "SESSION_INIT",
+        "to": "SESSION_COMPLETE",
+        "window": "\u2264 process budget (implementation-dependent)",
+        "source": "kit convention; tech-arch-v4.md \u00a714 compute budget",
+        "check": "SESSION_COMPLETE.elapsed_seconds \u2265 0"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "SESSION_INIT",
+          "SESSION_COMPLETE"
+        ],
+        "cardinality": "1:1 per run_id",
+        "source": "sdd-kit-2/foundations/01-signal-driven-development.md \u00a7'SESSION_INIT pattern'",
+        "check": "for each run_id, count(SESSION_INIT) == count(SESSION_COMPLETE) == 1"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "ALIGNMENT_RUN_STARTED",
+          "ALIGNMENT_RUN_COMPLETED"
+        ],
+        "cardinality": "1:1 per align_run",
+        "source": "tech-arch-v4.md \u00a75",
+        "check": "for each run_id where run_kind=align, count == 1 each"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "SIM_RUN_STARTED",
+          "SIM_RUN_COMPLETED"
+        ],
+        "cardinality": "1:1 per sim_run",
+        "source": "tech-arch-v4.md \u00a711",
+        "check": "for each run_id where run_kind=simulate, count == 1 each"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED"
+        ],
+        "cardinality": "1:1 per (parent_run, session_date)",
+        "source": "tech-arch-v4.md \u00a75 RTH session boundary",
+        "check": "for each (align_run|sim_run, session_date), count == 1 each"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "POSITION_OPENED",
+          "POSITION_CLOSED"
+        ],
+        "cardinality": "1:1 per position within sim_run",
+        "source": "tech-arch-v4.md \u00a711.4",
+        "check": "within a sim_run, count == matched"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "BUCKETIZER_FITTED",
+          "BUCKET_STATS_WRITTEN"
+        ],
+        "cardinality": "1:1 within a training process",
+        "source": "tech-arch-v4.md \u00a77.1 frozen artifact discipline",
+        "check": "BUCKETIZER_FITTED precedes BUCKET_STATS_WRITTEN; both fire once"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "NORMALIZER_FITTED",
+          "NORMALIZER_STATE_WRITTEN"
+        ],
+        "cardinality": "1:1 within a training process",
+        "source": "tech-arch-v4.md \u00a76",
+        "check": "NORMALIZER_FITTED precedes NORMALIZER_STATE_WRITTEN; both fire once"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "COST_CALIBRATION_FITTED",
+          [
+            "SPREAD_SCALER_WRITTEN",
+            "KAPPA_WRITTEN"
+          ]
+        ],
+        "cardinality": "1:2 (one fit \u2192 two files)",
+        "source": "tech-arch-v4.md \u00a711.1 + \u00a711.2",
+        "check": "one COST_CALIBRATION_FITTED, then one each of SPREAD_SCALER_WRITTEN and KAPPA_WRITTEN"
+      },
+      {
+        "kind": "forbidden_after",
+        "after": "SESSION_COMPLETE",
+        "forbidden": "any tag in the vocabulary",
+        "source": "sdd-kit-2/foundations/01 SESSION invariant",
+        "check": "no tag has t > SESSION_COMPLETE.t within the process_session"
+      },
+      {
+        "kind": "forbidden_after",
+        "after": "CONFIG_VALIDATION_FAILED",
+        "forbidden": "any tag except SESSION_COMPLETE (with exit_code != 0)",
+        "source": "tech-arch-v4.md \u00a711.3 speaker's-mouth failure",
+        "check": "if CONFIG_VALIDATION_FAILED fires, the next and only remaining tag is SESSION_COMPLETE"
+      },
+      {
+        "kind": "forbidden_after",
+        "after": "CHANNEL_REJECTED",
+        "forbidden": "ALIGNMENT_ROW_EMITTED for the rejected (channel, symbol)",
+        "source": "tech-arch-v4.md \u00a74.1 'a channel that fails coverage is dropped or the schedule renegotiates'",
+        "check": "if CHANNEL_REJECTED(channel=X, symbol=Y), no ALIGNMENT_ROW_EMITTED touches (X, Y)"
+      },
+      {
+        "kind": "eventually_must",
+        "from": "SESSION_INIT",
+        "to": "SESSION_COMPLETE",
+        "guarantee": "every SESSION_INIT is eventually followed by a SESSION_COMPLETE (process exits cleanly OR the harness records an incomplete run)",
+        "source": "sdd-kit-2/foundations/01",
+        "check": "no dangling SESSION_INIT in the trace store"
+      },
+      {
+        "kind": "eventually_must",
+        "from": "SOURCE_FALLBACK_TRIGGERED",
+        "to": "INGESTION_CALL_ISSUED for the (channel, symbol) using to_source",
+        "guarantee": "after fallback trigger, subsequent fetches for the (channel, symbol) use to_source",
+        "source": "tech-arch-v4.md \u00a74.2 fallback contract",
+        "check": "no INGESTION_CALL_ISSUED for (channel, symbol) with source=from_source after the fallback fires"
+      },
+      {
+        "kind": "eventually_must",
+        "from": "TEST_LOOK_BUDGET_EXHAUSTED",
+        "to": "no TEST_LOOK_REGISTERED for the remainder of this vocabulary version",
+        "guarantee": "budget-exhaustion is terminal for the version; only a version bump (v0.2) resets",
+        "source": "tech-arch-v4.md \u00a713 'Test-set look budget: 3 for the whole v1'",
+        "check": "count(TEST_LOOK_REGISTERED after TEST_LOOK_BUDGET_EXHAUSTED at same vocab_version) == 0"
+      },
+      {
+        "kind": "at_most_once_per_session",
+        "tag": "SESSION_INIT",
+        "session": "process_session",
+        "source": "kit convention",
+        "check": "count(SESSION_INIT per run_id) == 1"
+      },
+      {
+        "kind": "at_most_once_per_session",
+        "tag": "SESSION_COMPLETE",
+        "session": "process_session",
+        "source": "kit convention",
+        "check": "count(SESSION_COMPLETE per run_id) == 1"
+      },
+      {
+        "kind": "at_most_once_per_process",
+        "tag": "BUCKETIZER_FITTED",
+        "scope": "per training-lifecycle process",
+        "source": "tech-arch-v4.md \u00a77.1 'frozen dequantizer'",
+        "check": "one fit per process; refits require a new run_id"
+      },
+      {
+        "kind": "at_most_once_per_process",
+        "tag": "NORMALIZER_FITTED",
+        "scope": "per training-lifecycle process",
+        "source": "tech-arch-v4.md \u00a76 'frozen at end of training'",
+        "check": "one fit per process"
+      },
+      {
+        "kind": "forced_next",
+        "from": "MANIFEST_STALE_OR_MISSING",
+        "to": "SESSION_COMPLETE",
+        "source": "tech-arch-v4.md \u00a74.1 hard-fail",
+        "check": "if MANIFEST_STALE_OR_MISSING fires, only SESSION_COMPLETE follows"
+      },
+      {
+        "kind": "forced_next",
+        "from": "TRAINING_DIVERGED",
+        "to": "SESSION_COMPLETE",
+        "source": "product-spec-v4.md gate 1",
+        "check": "if TRAINING_DIVERGED fires, TrainingLoop halts; no CHECKPOINT_WRITTEN or EPOCH_COMPLETED follows"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "INGESTION_CALL_RETRIED",
+          "INGESTION_CALL_ISSUED"
+        ],
+        "cardinality": "0..5 : 1 per (source, tool, params_hash)",
+        "source": "reviews/vocab-0.1-coverage-review.md finding 2",
+        "check": "the retried tag references the same params as the original issued tag"
+      },
+      {
+        "kind": "at_most_once_per_process",
+        "tag": "BUCKET_FREQUENCY_DRIFT_MEASURED",
+        "scope": "per (run_id, split)",
+        "source": "tech-arch-v4.md \u00a710",
+        "check": "one measurement per split per eval run"
+      },
+      {
+        "kind": "at_most_once_per_process",
+        "tag": "SENSITIVITY_PLOT_GENERATED",
+        "scope": "per held-out sim run",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1'",
+        "check": "one plot per held-out run"
+      },
+      {
+        "kind": "pairing",
+        "tags": [
+          "CAPACITY_SWEEP_COMPLETED",
+          [
+            "SIM_RUN_STARTED",
+            "SIM_RUN_COMPLETED"
+          ]
+        ],
+        "cardinality": "1 sweep : N per-size sim runs",
+        "source": "tech-arch-v4.md \u00a711.5",
+        "check": "CAPACITY_SWEEP_COMPLETED.points has one entry per SIM_RUN_STARTED within the sweep"
+      }
+    ],
+    "_halt_check_step_5": "Step 5 re-run round 5 against 54 tags. Ambient count still 10 (new tags are incident or summary). Cadence covers all 10. No conflicts between the two new forced_next rules (MANIFEST_STALE_OR_MISSING \u2192 SESSION_COMPLETE; TRAINING_DIVERGED \u2192 SESSION_COMPLETE) and the existing 10 cadence rules \u2014 the forced_next targets fire outside the cadence-bounded ambient streams. PASSES."
+  },
+  "state_transitions": {
+    "_layer": "Layer 5 \u2014 State-Transition. Directed graph of allowed orderings over the tag set. Sparse per BOOTSTRAP Step 6 note ('Not every tag pair needs a rule. Most Layer-5 rules cover the critical paths'). Session-scoped: each session stratum from Layer 3 defines an allowed_set of tags that may fire within it.",
+    "rules": [
+      {
+        "kind": "terminal",
+        "tag": "SESSION_COMPLETE",
+        "session": "process_session",
+        "note": "No tag may fire after SESSION_COMPLETE within its process_session."
+      },
+      {
+        "kind": "terminal",
+        "tag": "ALIGNMENT_RUN_COMPLETED",
+        "session": "align_run",
+        "note": "Closes align_run; no align-scope tag may fire after."
+      },
+      {
+        "kind": "terminal",
+        "tag": "SIM_RUN_COMPLETED",
+        "session": "sim_run",
+        "note": "Closes sim_run; no sim-scope tag may fire after."
+      },
+      {
+        "kind": "terminal",
+        "tag": "TRADING_SESSION_ENDED",
+        "session": "trading_session",
+        "note": "Closes trading_session; no per-bar tag for that session may fire after."
+      },
+      {
+        "kind": "forced_next",
+        "from": "CONFIG_VALIDATION_FAILED",
+        "to": "SESSION_COMPLETE",
+        "payload_match": "SESSION_COMPLETE.exit_code != 0",
+        "note": "Speaker's-mouth validation failure. Process exits without opening any downstream session."
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "SESSION_INIT",
+        "to": "SESSION_COMPLETE",
+        "same_scope": "run_id"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "ALIGNMENT_RUN_STARTED",
+        "to": "ALIGNMENT_RUN_COMPLETED",
+        "same_scope": "run_id"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "SIM_RUN_STARTED",
+        "to": "SIM_RUN_COMPLETED",
+        "same_scope": "run_id"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "TRADING_SESSION_STARTED",
+        "to": "TRADING_SESSION_ENDED",
+        "same_scope": "(parent_run, session_date)"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "POSITION_OPENED",
+        "to": "POSITION_CLOSED",
+        "same_scope": "position_within_sim_run"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "BUCKETIZER_FITTED",
+        "to": "BUCKET_STATS_WRITTEN",
+        "same_scope": "training-lifecycle process"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "NORMALIZER_FITTED",
+        "to": "NORMALIZER_STATE_WRITTEN",
+        "same_scope": "training-lifecycle process"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "COST_CALIBRATION_FITTED",
+        "to": "SPREAD_SCALER_WRITTEN",
+        "same_scope": "calibrate-lifecycle process"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "COST_CALIBRATION_FITTED",
+        "to": "KAPPA_WRITTEN",
+        "same_scope": "calibrate-lifecycle process"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "CHECKPOINT_WRITTEN",
+        "to": "SIM_RUN_STARTED",
+        "same_scope": "cross-process; SIM_RUN_STARTED.checkpoint_step references a prior CHECKPOINT_WRITTEN.step",
+        "note": "Simulator cannot open without a checkpoint to load. Cross-process rule; enforced by artifact existence, not by within-session ordering."
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "COST_CALIBRATION_FITTED",
+        "to": "SIM_RUN_STARTED",
+        "same_scope": "cross-process; SIM_RUN_STARTED.cost_calibration_run_id references a prior calibrate run",
+        "note": "Simulator cannot open without cost-calibration artifacts. tech-arch \u00a711 'A missing calibration file is a hard failure.'"
+      },
+      {
+        "kind": "pairing_ordering",
+        "from": "BUCKET_STATS_WRITTEN",
+        "to": "BUCKET_ASSIGNED",
+        "same_scope": "cross-process; BUCKET_ASSIGNED reads from bucket_stats.json"
+      },
+      {
+        "kind": "allowed_set",
+        "session": "align_run",
+        "allowed": [
+          "ALIGNMENT_ROW_EMITTED",
+          "AS_OF_JOIN_MISS",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED"
+        ],
+        "forbidden": "any train-scope, eval-scope, calibrate-scope, or sim-scope tag",
+        "note": "Between ALIGNMENT_RUN_STARTED and ALIGNMENT_RUN_COMPLETED, only align-scope tags may fire."
+      },
+      {
+        "kind": "allowed_set",
+        "session": "sim_run",
+        "allowed": [
+          "BAR_PROCESSED",
+          "PREDICTION_EMITTED",
+          "DECISION_MADE",
+          "POSITION_OPENED",
+          "POSITION_CLOSED",
+          "TRADE_LEDGERED",
+          "SIGNAL_DROPPED",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED",
+          "MARKET_STATE_TOKEN_EMITTED",
+          "BUCKET_ASSIGNED",
+          "FEATURE_COMPUTED"
+        ],
+        "forbidden": "any train-scope, align-scope, or calibrate-scope tag",
+        "note": "Simulator may re-compute features and tokens on the fly, so those ambient tags are allowed."
+      },
+      {
+        "kind": "allowed_set",
+        "session": "trading_session (under sim_run)",
+        "allowed": [
+          "BAR_PROCESSED",
+          "PREDICTION_EMITTED",
+          "DECISION_MADE",
+          "POSITION_OPENED",
+          "POSITION_CLOSED",
+          "TRADE_LEDGERED",
+          "SIGNAL_DROPPED",
+          "MARKET_STATE_TOKEN_EMITTED",
+          "BUCKET_ASSIGNED",
+          "FEATURE_COMPUTED"
+        ]
+      },
+      {
+        "kind": "allowed_set",
+        "session": "trading_session (under align_run)",
+        "allowed": [
+          "ALIGNMENT_ROW_EMITTED",
+          "AS_OF_JOIN_MISS"
+        ]
+      },
+      {
+        "kind": "allowed_set",
+        "session": "process_session where run_kind=probe",
+        "allowed": [
+          "SESSION_INIT",
+          "CHANNEL_PROBED",
+          "CHANNEL_COVERAGE_ASSESSED",
+          "CHANNEL_REJECTED",
+          "INGESTION_CALL_ISSUED",
+          "INGESTION_CALL_CACHED",
+          "SOURCE_FALLBACK_TRIGGERED",
+          "SESSION_COMPLETE"
+        ]
+      },
+      {
+        "kind": "allowed_set",
+        "session": "process_session where run_kind=align",
+        "allowed": [
+          "SESSION_INIT",
+          "INGESTION_CALL_ISSUED",
+          "INGESTION_CALL_CACHED",
+          "SOURCE_FALLBACK_TRIGGERED",
+          "RAW_OBSERVATION_WRITTEN",
+          "REVISION_LANDED",
+          "ALIGNMENT_RUN_STARTED",
+          "ALIGNMENT_ROW_EMITTED",
+          "AS_OF_JOIN_MISS",
+          "ALIGNMENT_RUN_COMPLETED",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED",
+          "SESSION_COMPLETE",
+          "MANIFEST_STALE_OR_MISSING",
+          "INGESTION_CALL_RETRIED",
+          "FEATURE_COMPUTATION_FAILED"
+        ]
+      },
+      {
+        "kind": "allowed_set",
+        "session": "process_session where run_kind=calibrate",
+        "allowed": [
+          "SESSION_INIT",
+          "COST_CALIBRATION_FITTED",
+          "SPREAD_SCALER_WRITTEN",
+          "KAPPA_WRITTEN",
+          "SESSION_COMPLETE"
+        ]
+      },
+      {
+        "kind": "allowed_set",
+        "session": "process_session where run_kind=train",
+        "allowed": [
+          "SESSION_INIT",
+          "CONFIG_RESOLVED",
+          "CONFIG_VALIDATION_FAILED",
+          "BUCKETIZER_FITTED",
+          "BUCKET_STATS_WRITTEN",
+          "BUCKET_ASSIGNED",
+          "NORMALIZER_FITTED",
+          "NORMALIZER_STATE_WRITTEN",
+          "FEATURE_COMPUTED",
+          "MARKET_STATE_TOKEN_EMITTED",
+          "WINDOW_SAMPLED",
+          "TRAINING_STEP_COMPLETED",
+          "CHECKPOINT_WRITTEN",
+          "EPOCH_COMPLETED",
+          "METRIC_COMPUTED",
+          "REGIME_LABELS_FROZEN",
+          "SESSION_COMPLETE",
+          "TRAINING_DIVERGED",
+          "FEATURE_COMPUTATION_FAILED",
+          "INGESTION_CALL_RETRIED",
+          "BUCKET_FREQUENCY_DRIFT_MEASURED",
+          "BASELINE_COMPARISON_ASSESSED"
+        ]
+      },
+      {
+        "kind": "allowed_set",
+        "session": "process_session where run_kind=eval",
+        "allowed": [
+          "SESSION_INIT",
+          "CONFIG_RESOLVED",
+          "CONFIG_VALIDATION_FAILED",
+          "BUCKET_ASSIGNED",
+          "MARKET_STATE_TOKEN_EMITTED",
+          "FEATURE_COMPUTED",
+          "METRIC_COMPUTED",
+          "METRIC_SNAPSHOT_WRITTEN",
+          "SESSION_COMPLETE",
+          "BUCKET_FREQUENCY_DRIFT_MEASURED",
+          "BASELINE_COMPARISON_ASSESSED"
+        ]
+      },
+      {
+        "kind": "allowed_set",
+        "session": "process_session where run_kind=simulate",
+        "allowed": [
+          "SESSION_INIT",
+          "CONFIG_RESOLVED",
+          "CONFIG_VALIDATION_FAILED",
+          "SIM_RUN_STARTED",
+          "BAR_PROCESSED",
+          "PREDICTION_EMITTED",
+          "DECISION_MADE",
+          "POSITION_OPENED",
+          "POSITION_CLOSED",
+          "TRADE_LEDGERED",
+          "SIGNAL_DROPPED",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED",
+          "SIM_RUN_COMPLETED",
+          "MARKET_STATE_TOKEN_EMITTED",
+          "BUCKET_ASSIGNED",
+          "FEATURE_COMPUTED",
+          "TEST_LOOK_REGISTERED",
+          "TEST_LOOK_BUDGET_EXHAUSTED",
+          "SESSION_COMPLETE",
+          "SENSITIVITY_PLOT_GENERATED",
+          "CAPACITY_SWEEP_COMPLETED"
+        ]
+      },
+      {
+        "kind": "forced_next",
+        "from": "MANIFEST_STALE_OR_MISSING",
+        "to": "SESSION_COMPLETE",
+        "payload_match": "SESSION_COMPLETE.exit_code != 0",
+        "note": "Manifest hard-fail. AlignmentJoin refuses to proceed."
+      },
+      {
+        "kind": "forced_next",
+        "from": "TRAINING_DIVERGED",
+        "to": "SESSION_COMPLETE",
+        "payload_match": "SESSION_COMPLETE.exit_code != 0",
+        "note": "TrainingLoop detects divergence; halts before further steps."
+      }
+    ],
+    "_reachability_check": {
+      "_note": "BOOTSTRAP Step 6 halt: unreachable tags. Walked every tag; each is reachable from SESSION_INIT via one of the six run_kind allowed_sets above.",
+      "reachable_from_session_init": [
+        "SESSION_INIT",
+        "SESSION_COMPLETE",
+        "CHANNEL_PROBED",
+        "CHANNEL_COVERAGE_ASSESSED",
+        "CHANNEL_REJECTED",
+        "INGESTION_CALL_ISSUED",
+        "INGESTION_CALL_CACHED",
+        "SOURCE_FALLBACK_TRIGGERED",
+        "RAW_OBSERVATION_WRITTEN",
+        "REVISION_LANDED",
+        "ALIGNMENT_RUN_STARTED",
+        "ALIGNMENT_ROW_EMITTED",
+        "ALIGNMENT_RUN_COMPLETED",
+        "AS_OF_JOIN_MISS",
+        "TRADING_SESSION_STARTED",
+        "TRADING_SESSION_ENDED",
+        "FEATURE_COMPUTED",
+        "NORMALIZER_FITTED",
+        "NORMALIZER_STATE_WRITTEN",
+        "BUCKETIZER_FITTED",
+        "BUCKET_STATS_WRITTEN",
+        "BUCKET_ASSIGNED",
+        "MARKET_STATE_TOKEN_EMITTED",
+        "CONFIG_RESOLVED",
+        "CONFIG_VALIDATION_FAILED",
+        "WINDOW_SAMPLED",
+        "TRAINING_STEP_COMPLETED",
+        "CHECKPOINT_WRITTEN",
+        "EPOCH_COMPLETED",
+        "METRIC_COMPUTED",
+        "METRIC_SNAPSHOT_WRITTEN",
+        "REGIME_LABELS_FROZEN",
+        "COST_CALIBRATION_FITTED",
+        "SPREAD_SCALER_WRITTEN",
+        "KAPPA_WRITTEN",
+        "SIM_RUN_STARTED",
+        "BAR_PROCESSED",
+        "PREDICTION_EMITTED",
+        "DECISION_MADE",
+        "POSITION_OPENED",
+        "POSITION_CLOSED",
+        "TRADE_LEDGERED",
+        "SIGNAL_DROPPED",
+        "SIM_RUN_COMPLETED",
+        "TEST_LOOK_REGISTERED",
+        "TEST_LOOK_BUDGET_EXHAUSTED",
+        "TRAINING_DIVERGED",
+        "MANIFEST_STALE_OR_MISSING",
+        "BUCKET_FREQUENCY_DRIFT_MEASURED",
+        "SENSITIVITY_PLOT_GENERATED",
+        "INGESTION_CALL_RETRIED",
+        "FEATURE_COMPUTATION_FAILED",
+        "CAPACITY_SWEEP_COMPLETED"
+      ],
+      "unreachable": [],
+      "special_case_TEST_LOOK_BUDGET_EXHAUSTED": "Fires from a runtime refusal inside a simulate or eval process_session that attempts to touch held-out data beyond budget. Enforced structurally by the pre-commit hook (tech-arch \u00a713) as well; the pre-commit path fires outside any process_session frame and is a git-history event, not a signal-stream event. The version here treats runtime refusal as the emission site."
+    },
+    "_cycle_check": {
+      "_note": "BOOTSTRAP Step 6 halt: unexpected cycles. Every named cycle is a session boundary open/close pair; no cycles outside session semantics found.",
+      "cycles": [
+        "process_session: SESSION_INIT \u2192 ... \u2192 SESSION_COMPLETE",
+        "align_run: ALIGNMENT_RUN_STARTED \u2192 ... \u2192 ALIGNMENT_RUN_COMPLETED",
+        "sim_run: SIM_RUN_STARTED \u2192 ... \u2192 SIM_RUN_COMPLETED",
+        "trading_session: TRADING_SESSION_STARTED \u2192 ... \u2192 TRADING_SESSION_ENDED",
+        "training loop: TRAINING_STEP_COMPLETED repeats within an EPOCH_COMPLETED, EPOCH_COMPLETED repeats within a training process \u2014 bounded by the fixed step budget."
+      ]
+    },
+    "_halt_check_step_6": "Re-run round 5 against 54 tags and 29 rules. Reachability: every tag reachable from SESSION_INIT via a run_kind allowed_set. Cycles: the five named + no new unnamed. Rule conflicts against Layer 4: none. PASSES."
+  },
+  "operators": {
+    "_layer": "Layer 6 \u2014 Runtime / Operator. 24 operators named. Fulfills the P-015 domain-vs-runtime commitment from BLACKBOARD \u00a7 Deferred: IngestionClient, AlignmentJoin, SourceFallback, TrainingLoop, Simulator plus the reclassified Embedder / Bucketizer / Normalizer + their Layer-0 seat crossrefs, plus additional operators found by walking tech-arch's module layout (PhaseZeroProbe, ChannelFetcher, FeaturePipeline, PriceSpaceLLM, BaselineModel, PriceSpaceDataset, Evaluator, CostCalibrator, SimulatorPolicy, SimulatorCostModel, ConfigResolver, ExperimentLogbook, TestLookGuard, TrainerReporter, ChannelMixerEmbedder).",
+    "operators": [
+      {
+        "name": "ProcessRunner",
+        "responsibility": "The main entrypoint of every script (probe_channels, align, train, evaluate, simulate, calibrate_spread, calibrate_kappa, register_run). Emits SESSION_INIT as the first signal of the capture, wraps the run's work, catches exceptions, emits SESSION_COMPLETE as the last signal with exit_code and elapsed_seconds. Sets the process_session bounds every downstream operator emits within.",
+        "emits": [
+          "SESSION_INIT",
+          "SESSION_COMPLETE"
+        ],
+        "consumes": {
+          "artifacts": [
+            "ExperimentConfig (via ConfigResolver)",
+            "git rev-parse HEAD",
+            "tokenized data hash"
+          ],
+          "tags": []
+        },
+        "source": "sdd-kit-2/foundations/01 SESSION_INIT pattern + example/wordcount main() precedent + tech-arch-v4.md \u00a73 scripts/ layout"
+      },
+      {
+        "name": "PhaseZeroProbe",
+        "responsibility": "Walks channels_v1.yaml, hits each Source at five sample dates, records what the vendor actually returned; writes data/manifests/channel_coverage.json. Runs before any pipeline stage.",
+        "emits": [
+          "CHANNEL_PROBED",
+          "CHANNEL_COVERAGE_ASSESSED",
+          "CHANNEL_REJECTED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "configs/channels/v1.yaml"
+          ],
+          "tags": []
+        },
+        "performance_constraint": "minutes; rate-limited by IngestionClient",
+        "source": "tech-arch-v4.md \u00a74.1 scripts/probe_channels.py"
+      },
+      {
+        "name": "IngestionClient",
+        "responsibility": "Thin fa\u00e7ade over vendor Sources. Token-bucket rate limiter, retry-with-backoff on 429/5xx, response validation, Parquet caching keyed by sha256(tool, params). Manages source fallback.",
+        "emits": [
+          "INGESTION_CALL_ISSUED",
+          "INGESTION_CALL_CACHED",
+          "INGESTION_CALL_RETRIED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "data/raw/{source}/{channel}/{symbol}/{yyyy-mm}.parquet (cache)"
+          ],
+          "tags": []
+        },
+        "fallback": [
+          "mcp_av \u2192 polygon (via SourceFallback)"
+        ],
+        "performance_constraint": "\u2264 75 req/min per Source (default token bucket)",
+        "source": "tech-arch-v4.md \u00a74.2 IngestionClient class sketch"
+      },
+      {
+        "name": "SourceFallback",
+        "responsibility": "Detects primary-source failure modes (frequency_unavailable, history_gap, rate_limit_exhausted, response_invalid); switches subsequent calls for the (channel, symbol) to the secondary Source.",
+        "emits": [
+          "SOURCE_FALLBACK_TRIGGERED"
+        ],
+        "consumes": {
+          "artifacts": [],
+          "tags": [
+            "INGESTION_CALL_ISSUED (as trigger context)"
+          ]
+        },
+        "source": "tech-arch-v4.md \u00a74.2 'Fallback is Polygon.io for equities minute bars when the MCP falls short'"
+      },
+      {
+        "name": "ChannelFetcher",
+        "responsibility": "Per-channel adapter implementing fetch(symbol, start, end, freq) \u2192 DataFrame. Requests 15-min where the vendor supports it; downsamples to 15-min otherwise. Writes RawObservation rows carrying value_time, released_at, known_at, revision_id.",
+        "emits": [
+          "RAW_OBSERVATION_WRITTEN",
+          "REVISION_LANDED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "IngestionClient.call(...) output"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a74.2 ChannelFetcher Protocol + \u00a74.3 known_at schema"
+      },
+      {
+        "name": "AlignmentJoin",
+        "responsibility": "Polars join_asof on known_at against the 15-min UTC grid. Selects the most recent row per channel satisfying known_at \u2264 t; picks the latest revision. Writes data/aligned/{run_id}.parquet with missing_mask, age_since_known_at, observed_at_this_grid_step columns.",
+        "emits": [
+          "ALIGNMENT_RUN_STARTED",
+          "ALIGNMENT_ROW_EMITTED",
+          "AS_OF_JOIN_MISS",
+          "ALIGNMENT_RUN_COMPLETED",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED",
+          "MANIFEST_STALE_OR_MISSING"
+        ],
+        "consumes": {
+          "artifacts": [
+            "data/raw/**/*.parquet",
+            "data/manifests/channel_coverage.json (staleness gate)"
+          ],
+          "tags": []
+        },
+        "performance_constraint": "Polars join_asof ~1s on the aligned dataset per tech-arch \u00a717",
+        "layer_0_seat": "AlignedRow (Layer 0 entity)",
+        "source": "tech-arch-v4.md \u00a74.3 + \u00a75 alignment"
+      },
+      {
+        "name": "FeaturePipeline",
+        "responsibility": "Computes per-bar causal features from AlignedRow context. Rolling windows have min_periods; label-adjacent columns are .shift(1)-ed. Emits per (feature_name, channel, timestamp).",
+        "emits": [
+          "FEATURE_COMPUTED",
+          "FEATURE_COMPUTATION_FAILED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "data/aligned/{run_id}.parquet"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a76 feature computation"
+      },
+      {
+        "name": "CausalNormalizer",
+        "responsibility": "Expanding-window causal z-scorer. Fits on training partition only, freezes at end of training. Writes artifacts/{run_id}/normalizers.pt.",
+        "emits": [
+          "NORMALIZER_FITTED",
+          "NORMALIZER_STATE_WRITTEN"
+        ],
+        "consumes": {
+          "artifacts": [
+            "training-partition slice of aligned parquet"
+          ],
+          "tags": []
+        },
+        "layer_0_seat": "NormalizerState (Layer 0 entity)",
+        "source": "tech-arch-v4.md \u00a76 Normalization + product-spec \u00a7Feature normalization"
+      },
+      {
+        "name": "ReturnBucketizer",
+        "responsibility": "Discretizes vol-normalized returns into V \u2208 {16, 32, 64} buckets, percentile-uniform in the interior with outer tails. Fits on training only; writes artifacts/tokenizer/bucket_stats.json (frozen dequantizer).",
+        "emits": [
+          "BUCKETIZER_FITTED",
+          "BUCKET_STATS_WRITTEN",
+          "BUCKET_ASSIGNED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "training-partition target log-returns"
+          ],
+          "tags": []
+        },
+        "layer_0_seat": "BucketStats (Layer 0 entity)",
+        "source": "tech-arch-v4.md \u00a77.1"
+      },
+      {
+        "name": "MarketStateEmbedder",
+        "responsibility": "Per-channel nn.Linear projections, summed to one d_model vector per bar. No channel-type embedding inside the sum (v4 removal). Layer-0 output is MarketStateToken.",
+        "emits": [
+          "MARKET_STATE_TOKEN_EMITTED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "Feature outputs from FeaturePipeline"
+          ],
+          "tags": []
+        },
+        "layer_0_seat": "MarketStateToken (Layer 0 entity \u2014 runtime output, not frozen file)",
+        "source": "tech-arch-v4.md \u00a77.2"
+      },
+      {
+        "name": "ChannelMixerEmbedder",
+        "responsibility": "Ablation variant. Per-channel projections + one-block cross-channel attention block before temporal transformer. Parameter-matched to MarketStateEmbedder.",
+        "emits": [
+          "MARKET_STATE_TOKEN_EMITTED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "Feature outputs"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a710 architecture ablation 'channel-aware fusion'"
+      },
+      {
+        "name": "PriceSpaceLLM",
+        "responsibility": "Causal decoder over MarketStateToken sequence. RoPE, pre-LN, GELU, causal SDPA. Head projects to V-bucket logits at every position.",
+        "emits": [],
+        "consumes": {
+          "artifacts": [
+            "MarketStateToken sequence"
+          ],
+          "tags": []
+        },
+        "model_route": "one of xs (1M) / sm (3M) / md (10M) / lg (30M) per size sweep",
+        "performance_constraint": "bf16 mixed precision; batch fills GPU memory",
+        "source": "tech-arch-v4.md \u00a78"
+      },
+      {
+        "name": "BaselineModel",
+        "responsibility": "One of LinearBaseline, MLPBaseline, GRUBaseline (~1M each) \u2014 the ladder isolating depth / same-state nonlinearity / basic temporal modeling. Same input tokens, same targets, same seeds.",
+        "emits": [],
+        "consumes": {
+          "artifacts": [
+            "MarketStateToken sequence"
+          ],
+          "tags": []
+        },
+        "model_route": "run_kind = train with variant discriminator (linear / mlp / gru / tcn)",
+        "source": "tech-arch-v4.md \u00a710 Baselines"
+      },
+      {
+        "name": "PriceSpaceDataset",
+        "responsibility": "mmaps data/tokenized/{run_id}.pt. Random-window sampling: uniform over valid starts per draw. build_split_mask enforces date range and embargo. Yields (feats: dict, target, mask) triples of length context_len.",
+        "emits": [
+          "WINDOW_SAMPLED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "data/tokenized/{run_id}.pt"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a79.2"
+      },
+      {
+        "name": "TrainingLoop",
+        "responsibility": "All-position cross-entropy loss (every valid position predicts next bucket). Optional magnitude-weighted variant via alpha in config. AdamW, cosine LR with warmup, gradient clip at 1.0. bf16 autocast.",
+        "emits": [
+          "TRAINING_STEP_COMPLETED",
+          "EPOCH_COMPLETED",
+          "CHECKPOINT_WRITTEN",
+          "TRAINING_DIVERGED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "PriceSpaceDataset windows",
+            "ExperimentConfig"
+          ],
+          "tags": []
+        },
+        "performance_constraint": "single A10 or A100; ~$500 v1 budget covers all sweeps + ablations",
+        "source": "tech-arch-v4.md \u00a79 training"
+      },
+      {
+        "name": "Evaluator",
+        "responsibility": "Per-step, per-eval, and per-run metric computation. Cross-entropy at every valid position averaged over val partition. Regime split with frozen VIX terciles. Writes artifacts/{run_id}/metrics.json.",
+        "emits": [
+          "METRIC_COMPUTED",
+          "METRIC_SNAPSHOT_WRITTEN",
+          "REGIME_LABELS_FROZEN",
+          "BUCKET_FREQUENCY_DRIFT_MEASURED",
+          "BASELINE_COMPARISON_ASSESSED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "Checkpoint from TrainingLoop",
+            "validation-partition slice"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a710 evaluation"
+      },
+      {
+        "name": "CostCalibrator",
+        "responsibility": "Two fits, one script pair. calibrate_spread.py regresses Corwin-Schultz proxy against measured BBO on the training window; calibrate_kappa.py OLS for slippage with heteroskedasticity-robust SEs. Writes artifacts/cost_calibration/{spread_scaler,kappa}.json.",
+        "emits": [
+          "COST_CALIBRATION_FITTED",
+          "SPREAD_SCALER_WRITTEN",
+          "KAPPA_WRITTEN"
+        ],
+        "consumes": {
+          "artifacts": [
+            "BBO snapshots (30-day window in training range)",
+            "training-partition target bars"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a711.1 + \u00a711.2"
+      },
+      {
+        "name": "Simulator",
+        "responsibility": "Bar-by-bar walker over the test range. Reads a Checkpoint and a CostCalibration; hosts SimulatorPolicy and SimulatorCostModel; iterates trading sessions and per-bar decisions. Fills at next bar's open. Writes SimResult.",
+        "emits": [
+          "SIM_RUN_STARTED",
+          "BAR_PROCESSED",
+          "PREDICTION_EMITTED",
+          "DECISION_MADE",
+          "POSITION_OPENED",
+          "POSITION_CLOSED",
+          "TRADE_LEDGERED",
+          "SIGNAL_DROPPED",
+          "SIM_RUN_COMPLETED",
+          "TRADING_SESSION_STARTED",
+          "TRADING_SESSION_ENDED",
+          "TEST_LOOK_REGISTERED",
+          "TEST_LOOK_BUDGET_EXHAUSTED",
+          "SENSITIVITY_PLOT_GENERATED",
+          "CAPACITY_SWEEP_COMPLETED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "artifacts/{run_id}/checkpoint.pt",
+            "artifacts/cost_calibration/spread_scaler.json",
+            "artifacts/cost_calibration/kappa.json (missing = hard fail)",
+            "data/aligned/{run_id}.parquet (test range)"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a711 simulator"
+      },
+      {
+        "name": "SimulatorPolicy",
+        "responsibility": "Decision rule: edge = expected_return \u2212 spread_cost \u2212 kappa\u00b7size \u2212 lambda_risk\u00b7variance(p). Long if edge > threshold, short if < \u2212threshold, else flat. Size = clip(edge / uncertainty_scale, \u00b1max_size). Same-direction re-entries dropped; opposite flips need > threshold\u00b7(1+hysteresis).",
+        "emits": [],
+        "consumes": {
+          "artifacts": [
+            "Prediction from Simulator",
+            "ExperimentConfig.lambda_risk / threshold / hysteresis / max_size"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a711.4"
+      },
+      {
+        "name": "SimulatorCostModel",
+        "responsibility": "spread_cost = 0.5 \u00b7 calibrated_spread_t; slippage = kappa \u00b7 size. Reads CostCalibration artifacts at simulator startup; refuses to run if files missing.",
+        "emits": [],
+        "consumes": {
+          "artifacts": [
+            "SPREAD_SCALER_WRITTEN output",
+            "KAPPA_WRITTEN output"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a711.1 + \u00a711.2 + \u00a711.3"
+      },
+      {
+        "name": "ConfigResolver",
+        "responsibility": "Hydra composition + Pydantic v2 validation at load. Composes YAML groups (target, data, features, tokenizer, model, training, simulation). lambda_risk must be present; missing fails registration.",
+        "emits": [
+          "CONFIG_RESOLVED",
+          "CONFIG_VALIDATION_FAILED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "configs/experiments/*.yaml"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a711.3 + \u00a712"
+      },
+      {
+        "name": "ExperimentLogbook",
+        "responsibility": "Writes one row per training run to experiments/logbook.csv. Includes run_id, git_sha, config_hash, data_hash, all val metrics, held-out Sharpe if any, touched_test boolean.",
+        "emits": [],
+        "consumes": {
+          "artifacts": [
+            "SDD trace run metadata via register_run.py"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a713 + scripts/register_run.py"
+      },
+      {
+        "name": "TestLookGuard",
+        "responsibility": "Two-part enforcement. Runtime: scripts/simulate.py and scripts/evaluate.py refuse to touch held-out data if experiments/test_looks.log already lists three lines for this vocabulary version. Pre-commit: scripts/check_test_look.sh fails commits whose changed configs contain dates \u2265 2024-01-01 without the literal [test-look] token.",
+        "emits": [
+          "TEST_LOOK_REGISTERED",
+          "TEST_LOOK_BUDGET_EXHAUSTED"
+        ],
+        "consumes": {
+          "artifacts": [
+            "experiments/test_looks.log"
+          ],
+          "tags": []
+        },
+        "source": "tech-arch-v4.md \u00a713"
+      }
+    ],
+    "_halt_check_step_7": {
+      "operator_count": 24,
+      "tag_count": 55,
+      "tags_with_no_emitter": [],
+      "verdict": "PASSES"
+    },
+    "_dual_classifications": [
+      {
+        "entity": "NormalizerState",
+        "layer_0_role": "frozen fit-state file",
+        "layer_6_role": "produced by CausalNormalizer operator"
+      },
+      {
+        "entity": "BucketStats",
+        "layer_0_role": "frozen fit-state file",
+        "layer_6_role": "produced by ReturnBucketizer operator"
+      },
+      {
+        "entity": "MarketStateToken",
+        "layer_0_role": "runtime output vector (not frozen file)",
+        "layer_6_role": "produced by MarketStateEmbedder or ChannelMixerEmbedder operator"
+      },
+      {
+        "entity": "Session",
+        "layer_0_role": "trading-session interior entity",
+        "layer_3_role": "session stratum framed by TRADING_SESSION_STARTED / TRADING_SESSION_ENDED"
+      }
+    ]
+  },
+  "evidence_constraints": {
+    "_layer": "Layer 7 \u2014 Evidence. Constraints on payload content beyond type signature. Numeric ranges, diagnostic-required for incident stratum, outcome-required for summary stratum, cross-reference and frozen-artifact and training-only-fit constraints. Tonal constraints (voice canon) do not apply to signal payloads in this project \u2014 the tone canon in WORKING_AGREEMENT targets CLI stderr, not signal fields.",
+    "constraints": [
+      {
+        "kind": "range",
+        "target_tag": "PREDICTION_EMITTED",
+        "target_field": "p_up",
+        "spec": "0.0 \u2264 p_up \u2264 1.0",
+        "source": "probability semantics; softmax marginalisation",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "PREDICTION_EMITTED",
+        "target_field": "sharpness",
+        "spec": "0.0 \u2264 sharpness \u2264 1.0 (1 \u2212 entropy(p)/log(V))",
+        "source": "tech-arch-v4.md \u00a711",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "CHANNEL_PROBED",
+        "target_field": "missing_fraction",
+        "spec": "0.0 \u2264 missing_fraction \u2264 1.0",
+        "source": "fraction semantics",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "CHANNEL_COVERAGE_ASSESSED",
+        "target_field": "overall_missing_fraction",
+        "spec": "0.0 \u2264 overall_missing_fraction \u2264 1.0",
+        "source": "fraction semantics",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "SESSION_COMPLETE",
+        "target_field": "exit_code",
+        "spec": "integer \u2265 0 (0 clean; non-zero per run_kind's contract)",
+        "source": "OS process convention",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "TRADING_SESSION_ENDED",
+        "target_field": "bar_count",
+        "spec": "integer in [1, 26] on RTH; 26 is the normal-day count",
+        "source": "tech-arch-v4.md \u00a75 '26 bars (6.5 hours \u00d7 4 bars/hour)'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "BUCKET_ASSIGNED",
+        "target_field": "bucket_id",
+        "spec": "0 \u2264 bucket_id < n_buckets (where n_buckets is the trained V)",
+        "source": "tech-arch-v4.md \u00a77.1 zero-indexed",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "SIM_RUN_COMPLETED",
+        "target_field": "block_bootstrap_positive_fraction",
+        "spec": "0.0 \u2264 block_bootstrap_positive_fraction \u2264 1.0; gate requires \u2265 0.70",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "COST_CALIBRATION_FITTED",
+        "target_field": "kappa_r2",
+        "spec": "0.0 \u2264 kappa_r2 \u2264 1.0",
+        "source": "R\u00b2 semantics",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "TEST_LOOK_REGISTERED",
+        "target_field": "looks_remaining",
+        "spec": "0 \u2264 looks_remaining \u2264 3",
+        "source": "tech-arch-v4.md \u00a713 three-look budget",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "REGIME_LABELS_FROZEN",
+        "target_field": "low_threshold",
+        "spec": "low_threshold < mid_threshold",
+        "source": "tercile ordering",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "CHANNEL_REJECTED",
+        "target_field": "reason",
+        "spec": "reason \u2208 enum values; must be present",
+        "source": "tech-arch-v4.md \u00a74.1 'a channel that fails coverage is dropped'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "SOURCE_FALLBACK_TRIGGERED",
+        "target_field": "reason",
+        "spec": "reason \u2208 enum values; from_source and to_source must be present",
+        "source": "tech-arch-v4.md \u00a74.2 fallback contract",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "AS_OF_JOIN_MISS",
+        "target_field": "reason",
+        "spec": "reason \u2208 enum values; channel and symbol identifying the miss",
+        "source": "tech-arch-v4.md \u00a75 alignment",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "CONFIG_VALIDATION_FAILED",
+        "target_field": "missing_or_invalid_fields + error_message",
+        "spec": "both must be non-empty; missing_or_invalid_fields lists the specific keys",
+        "source": "tech-arch-v4.md \u00a711.3 speaker's-mouth failure",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "SIGNAL_DROPPED",
+        "target_field": "dropped_reason",
+        "spec": "dropped_reason \u2208 enum values",
+        "source": "tech-arch-v4.md \u00a711.4",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "TEST_LOOK_BUDGET_EXHAUSTED",
+        "target_field": "existing_looks + attempted_run_id",
+        "spec": "both must be present",
+        "source": "tech-arch-v4.md \u00a713",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "CHANNEL_COVERAGE_ASSESSED",
+        "target_field": "verdict",
+        "spec": "verdict \u2208 {accepted, dropped, renegotiate}; the summary's operational outcome",
+        "source": "tech-arch-v4.md \u00a74.1",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "ALIGNMENT_RUN_COMPLETED",
+        "target_field": "total_rows + missing_fractions_per_channel + elapsed_seconds",
+        "spec": "all three present; missing_fractions_per_channel keys are the channels aligned",
+        "source": "tech-arch-v4.md \u00a75",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "SESSION_COMPLETE",
+        "target_field": "exit_code + elapsed_seconds",
+        "spec": "both present; SESSION_COMPLETE is the run's terminal fact",
+        "source": "sdd-kit-2/foundations/01 SESSION_COMPLETE invariant",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "NORMALIZER_FITTED",
+        "target_field": "feature_count + warmup_bars",
+        "spec": "both present; describes the frozen state's shape",
+        "source": "tech-arch-v4.md \u00a76",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "BUCKETIZER_FITTED",
+        "target_field": "n_buckets + train_partition_row_count",
+        "spec": "both present",
+        "source": "tech-arch-v4.md \u00a77.1",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "EPOCH_COMPLETED",
+        "target_field": "mean_train_loss + n_steps",
+        "spec": "both present",
+        "source": "tech-arch-v4.md \u00a79",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "COST_CALIBRATION_FITTED",
+        "target_field": "kappa_point + kappa_se + kappa_ci_low + kappa_ci_high + kappa_r2 + n",
+        "spec": "all six present; measurement, not starting value",
+        "source": "tech-arch-v4.md \u00a711.2",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "SIM_RUN_COMPLETED",
+        "target_field": "sharpe_point + sharpe_se + block_bootstrap_positive_fraction + max_drawdown + capacity_usd + n_trades",
+        "spec": "all six present; every Sharpe number appears as Sharpe \u00b1 SE",
+        "source": "tech-arch-v4.md \u00a711.5 + product-spec-v4.md 'Sharpe is reported with its standard error'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "required_field",
+        "target_tag": "CONFIG_RESOLVED",
+        "target_field": "lambda_risk",
+        "spec": "lambda_risk MUST be present in every CONFIG_RESOLVED emission; absent value fires CONFIG_VALIDATION_FAILED at Pydantic load time",
+        "source": "tech-arch-v4.md \u00a711.3 'A run without an explicit lambda_risk in its resolved config fails registration' + BLACKBOARD Deferred (Step 8 revisit trigger fulfilled)",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "required_field",
+        "target_tag": "CONFIG_RESOLVED",
+        "target_field": "alpha_mag_weight",
+        "spec": "alpha_mag_weight MUST be present; 0.0 recovers unweighted CE",
+        "source": "tech-arch-v4.md \u00a711.3",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "frozen_artifact",
+        "target_tag": "BUCKET_STATS_WRITTEN",
+        "target_field": "path",
+        "spec": "artifacts/tokenizer/bucket_stats.json is written once and never overwritten. Downstream operators read from it; nobody recomputes.",
+        "source": "tech-arch-v4.md \u00a77 + WORKING_AGREEMENT.md \u00a7 Custom techniques 'Frozen-artifact contract'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "frozen_artifact",
+        "target_tag": "NORMALIZER_STATE_WRITTEN",
+        "target_field": "path",
+        "spec": "artifacts/{run_id}/normalizers.pt is written once and never overwritten within a run",
+        "source": "tech-arch-v4.md \u00a76",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "frozen_artifact",
+        "target_tag": "SPREAD_SCALER_WRITTEN",
+        "target_field": "path",
+        "spec": "artifacts/cost_calibration/spread_scaler.json is written once per calibration run; missing = hard fail at simulator startup",
+        "source": "tech-arch-v4.md \u00a711.1",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "frozen_artifact",
+        "target_tag": "KAPPA_WRITTEN",
+        "target_field": "path",
+        "spec": "artifacts/cost_calibration/kappa.json is written once per calibration run; missing = hard fail",
+        "source": "tech-arch-v4.md \u00a711.2",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "cardinality",
+        "target_tag": "TEST_LOOK_REGISTERED",
+        "target_field": "count",
+        "spec": "sum(TEST_LOOK_REGISTERED per vocab_version) \u2264 3",
+        "source": "tech-arch-v4.md \u00a713 'Test-set look budget: 3 for the whole v1'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "cardinality",
+        "target_tag": "SESSION_INIT",
+        "target_field": "count",
+        "spec": "count(SESSION_INIT per run_id) == 1 (via Layer 4 at_most_once_per_session invariant)",
+        "source": "sdd-kit-2/foundations/01",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "cardinality",
+        "target_tag": "SESSION_COMPLETE",
+        "target_field": "count",
+        "spec": "count(SESSION_COMPLETE per run_id) == 1",
+        "source": "sdd-kit-2/foundations/01",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "training_only_fit",
+        "target_tag": "BUCKETIZER_FITTED",
+        "target_field": "training_range_end",
+        "spec": "BucketStats.fit only touches the training partition; val and test rows never inform the fit",
+        "source": "tech-arch-v4.md \u00a77.1 'Fit on ... over training bars only'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "training_only_fit",
+        "target_tag": "NORMALIZER_FITTED",
+        "target_field": "training_range_end",
+        "spec": "NormalizerState only fits on the training partition",
+        "source": "tech-arch-v4.md \u00a76",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "training_only_fit",
+        "target_tag": "REGIME_LABELS_FROZEN",
+        "target_field": "training_range_end",
+        "spec": "VIX terciles computed on training window; applied unchanged to val and test",
+        "source": "product-spec-v4.md \u00a7'Regime evaluation'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "training_only_fit",
+        "target_tag": "COST_CALIBRATION_FITTED",
+        "target_field": "n",
+        "spec": "spread scaler and kappa fit on the training window only; sensitivity plot at 0.5\u00d7\u20132\u00d7 reported at eval",
+        "source": "tech-arch-v4.md \u00a711.1 + \u00a711.2",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "foreign_key_resolution",
+        "target_tag": "*",
+        "target_field": "*",
+        "spec": "Every entity_ref<X> field must resolve \u2014 X is a Layer-0 entity, and the value identifies a known instance. FK resolution rate 39/39 at Layer 2.",
+        "source": "grammar/PRINCIPLES.md Layer 7 cross-reference constraints",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "TRAINING_DIVERGED",
+        "target_field": "reason + step + train_loss + grad_norm",
+        "spec": "all present; reason \u2208 enum values",
+        "source": "reviews/vocab-0.1-coverage-review.md finding 1",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "MANIFEST_STALE_OR_MISSING",
+        "target_field": "reason + manifest_path + channel_config_mtime",
+        "spec": "all present; reason \u2208 enum values",
+        "source": "tech-arch-v4.md \u00a74.1",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "INGESTION_CALL_RETRIED",
+        "target_field": "reason + attempt + source",
+        "spec": "all present",
+        "source": "tech-arch-v4.md \u00a74.2",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "FEATURE_COMPUTATION_FAILED",
+        "target_field": "reason + channel + feature_name + timestamp",
+        "spec": "all present",
+        "source": "reviews/vocab-0.1-coverage-review.md finding 2",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "BUCKET_FREQUENCY_DRIFT_MEASURED",
+        "target_field": "train_frequency_by_bucket + realized_frequency_by_bucket + max_absolute_deviation + outer_bucket_ratio",
+        "spec": "all present; both frequency arrays length V; sum \u2248 1.0 each",
+        "source": "product-spec-v4.md \u00a7'Regime evaluation'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "SENSITIVITY_PLOT_GENERATED",
+        "target_field": "kappa_multipliers + sharpe_by_multiplier + min_sharpe + max_sharpe + sharpe_crosses_zero_in_range",
+        "spec": "all present; kappa_multipliers spans at least [0.5, 2.0]",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "CAPACITY_SWEEP_COMPLETED",
+        "target_field": "points + capacity_usd + sharpe_at_capacity",
+        "spec": "all present; capacity_usd == max(point.size_usd where point.sharpe > 0)",
+        "source": "tech-arch-v4.md \u00a711.5",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "range",
+        "target_tag": "SENSITIVITY_PLOT_GENERATED",
+        "target_field": "min_sharpe",
+        "spec": "min_sharpe > 0 required for the report to be robust; if false, the reported Sharpe is not a claim (product-spec gate)",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "invariant",
+        "target_tag": "SENSITIVITY_PLOT_GENERATED",
+        "target_field": "sharpe_crosses_zero_in_range",
+        "spec": "sharpe_crosses_zero_in_range == False is a v1 success gate; True flags the reported Sharpe as regime-fragile",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "required_field",
+        "target_tag": "SIM_RUN_STARTED",
+        "target_field": "checkpoint_run_id",
+        "spec": "checkpoint_run_id MUST be present; identifies the training run whose checkpoint the sim loads",
+        "source": "reviews/vocab-0.1-coverage-review.md finding 3",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "required_field",
+        "target_tag": "CHECKPOINT_WRITTEN",
+        "target_field": "val_top1 + val_top3",
+        "spec": "both present; per tech-arch \u00a79.3 SDD trace logs both",
+        "source": "tech-arch-v4.md \u00a79.3",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "required_field",
+        "target_tag": "DECISION_MADE",
+        "target_field": "effective_threshold",
+        "spec": "effective_threshold present; equals threshold*(1+hysteresis) on flip attempts, threshold otherwise",
+        "source": "tech-arch-v4.md \u00a711.4",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "required_field",
+        "target_tag": "POSITION_OPENED",
+        "target_field": "decision_bar_ts + fill_bar_ts",
+        "spec": "both present; fill_bar_ts > decision_bar_ts",
+        "source": "tech-arch-v4.md \u00a711.4 'Entries and exits print at the next bar's open'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "required_field",
+        "target_tag": "POSITION_CLOSED",
+        "target_field": "decision_bar_ts + fill_bar_ts + close_kind",
+        "spec": "all present; fill_bar_ts \u2265 decision_bar_ts; close_kind \u2208 enum values",
+        "source": "tech-arch-v4.md \u00a711.4 + reviews/vocab-0.1-coverage-review.md finding 2",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "expected_count",
+        "target_tag": "INGESTION_CALL_RETRIED",
+        "target_field": "count",
+        "spec": "0 per INGESTION_CALL_ISSUED in a healthy run; > 0 surfaces to Report. Cap \u2264 5 before SOURCE_FALLBACK_TRIGGERED fires.",
+        "source": "tech-arch-v4.md \u00a74.2 retry-with-backoff; reviews/vocab-0.1-round-5-review.md finding 2.1 (re-categorised from Layer 4 cadence)",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "expected_count",
+        "target_tag": "FEATURE_COMPUTATION_FAILED",
+        "target_field": "count",
+        "spec": "0 in a healthy pipeline; > 0 flags either a fixture-realism gap or a genuine data anomaly. Reported per run summary.",
+        "source": "reviews/vocab-0.1-round-5-review.md finding 2.1 (re-categorised from Layer 4 cadence)",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "gate",
+        "target_tag": "CAPACITY_SWEEP_COMPLETED",
+        "target_field": "capacity_usd",
+        "spec": "capacity_usd \u2265 1_000_000 for v1 pass",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1' 'Held-out capacity at least $1M'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "gate",
+        "target_tag": "SIM_RUN_COMPLETED",
+        "target_field": "sharpe_point - sharpe_se",
+        "spec": "sharpe_point - sharpe_se > 0 (minimum v1 gate)",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1' 'Minimum gate: Sharpe - 1\u00b7SE > 0'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "gate",
+        "target_tag": "SIM_RUN_COMPLETED",
+        "target_field": "sharpe_point",
+        "spec": "sharpe_point > 0.5 (stronger v1 gate)",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1' 'Stronger gate: Sharpe > 0.5'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "gate",
+        "target_tag": "SIM_RUN_COMPLETED",
+        "target_field": "block_bootstrap_positive_fraction",
+        "spec": "block_bootstrap_positive_fraction \u2265 0.70 (v1 gate; upgrades the round-4 range-with-gate-note-only entry)",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1' '\u226570% of block-bootstrap Sharpes positive'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "gate",
+        "target_tag": "METRIC_COMPUTED",
+        "target_field": "value",
+        "spec": "when name == 'ece' and split == 'val': value < 0.05",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1' 'Validation ECE below 0.05'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "gate",
+        "target_tag": "BASELINE_COMPARISON_ASSESSED",
+        "target_field": "meets_gate",
+        "spec": "meets_gate == True is required for baseline_kind \u2208 {linear, gru_tcn, target_only}",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1' 'Validation NLL at least 10%/5%/5% lower'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "gate",
+        "target_tag": "BASELINE_COMPARISON_ASSESSED",
+        "target_field": "required_delta_pct",
+        "spec": "required_delta_pct == 10 when baseline_kind == 'linear'; == 5 when baseline_kind \u2208 {gru_tcn, target_only}",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "outcome_required",
+        "target_tag": "BASELINE_COMPARISON_ASSESSED",
+        "target_field": "transformer_val_nll + baseline_val_nll + delta_pct + meets_gate",
+        "spec": "all present; delta_pct computed from the two nlls",
+        "source": "product-spec-v4.md \u00a7'Success gates for v1'",
+        "enforceability": "mechanical"
+      },
+      {
+        "kind": "diagnostic_required",
+        "target_tag": "CHANNEL_FETCH_FAILED",
+        "target_field": "error_message",
+        "spec": "non-empty string; captures vendor error verbatim so a Reviewer sees why the fetch failed",
+        "source": "PRINCIPLES.md incident-stratum halt condition (Sprint 022 close analog to CHANNEL_REJECTED's diagnostic constraint)",
+        "enforceability": "mechanical (validator can assert len(error_message) > 0 at emit)"
+      }
+    ],
+    "_stratum_coverage_check": {
+      "incident_tags": [
+        "AS_OF_JOIN_MISS",
+        "CHANNEL_REJECTED",
+        "CONFIG_VALIDATION_FAILED",
+        "FEATURE_COMPUTATION_FAILED",
+        "INGESTION_CALL_RETRIED",
+        "MANIFEST_STALE_OR_MISSING",
+        "SIGNAL_DROPPED",
+        "SOURCE_FALLBACK_TRIGGERED",
+        "TEST_LOOK_BUDGET_EXHAUSTED",
+        "TRAINING_DIVERGED"
+      ],
+      "incident_missing_diagnostic": [],
+      "summary_tags": [
+        "ALIGNMENT_RUN_COMPLETED",
+        "BASELINE_COMPARISON_ASSESSED",
+        "BUCKETIZER_FITTED",
+        "BUCKET_FREQUENCY_DRIFT_MEASURED",
+        "CAPACITY_SWEEP_COMPLETED",
+        "CHANNEL_COVERAGE_ASSESSED",
+        "COST_CALIBRATION_FITTED",
+        "EPOCH_COMPLETED",
+        "NORMALIZER_FITTED",
+        "SENSITIVITY_PLOT_GENERATED",
+        "SESSION_COMPLETE",
+        "SIM_RUN_COMPLETED"
+      ],
+      "summary_missing_outcome": []
+    },
+    "_halt_check_step_8": {
+      "incident_tags_without_diagnostic_constraint": [],
+      "summary_tags_without_outcome_constraint": [],
+      "verdict": "PASSES"
+    }
+  },
+  "report_binding": {
+    "_layer": "Layer 8 \u2014 Report binding. Maps this project's tag set into the four sections of the Signal Report template (sdd-kit-2/templates/SIGNAL_REPORT.md): Observed / Expected / Delta / Hypothesis, with the operational AAR subsections nested. Project has no view category, so the RENDERED sub-section is empty by design.",
+    "observed_categories": [
+      "session",
+      "probe",
+      "ingest",
+      "align",
+      "trading_session",
+      "feature",
+      "tokenize",
+      "embed",
+      "config",
+      "train",
+      "evaluate",
+      "calibrate",
+      "simulate",
+      "testlook"
+    ],
+    "rendered_categories": [],
+    "notes_categories": [
+      "incident"
+    ],
+    "grammar_drift_channel": "signals/proposals.json (all proposals) + BLACKBOARD \u00a7 Deferred (Step-2/7/8 forward commitments)",
+    "signal_trace_format": "t={float}  TAG_NAME  field1=value1  field2=value2  (per templates/SIGNAL_REPORT.md \u00a7 signal_trace)"
+  },
+  "grammar_growth": {
+    "_layer": "Layer 10 \u2014 Grammar-Growth. Meta-rules for how the grammar evolves post-lock.",
+    "taxonomy_version": "0.1",
+    "canonical_proposal_types": [
+      "NEW_TAG_PROPOSED",
+      "PAYLOAD_FIELD_PROPOSED",
+      "SEQUENCE_RULE_PROPOSED",
+      "INVARIANT_PROPOSED",
+      "TAG_SPLIT_PROPOSED",
+      "TAG_MERGE_PROPOSED",
+      "TAG_DEPRECATION_PROPOSED",
+      "ENTITY_MERGE_PROPOSED"
+    ],
+    "project_overrides": [
+      {
+        "override": "validator_extras_posture",
+        "value": "strict",
+        "source": "WORKING_AGREEMENT.md \u00a7 Vocabulary discipline"
+      },
+      {
+        "override": "cross_layer_forward_commitments_mechanism",
+        "value": "BLACKBOARD.md \u00a7 Deferred with revisit trigger",
+        "source": "reviews/vocab-0.1-round-3-review.md finding 4 + 5; round-4 recast made the mechanism uniform"
+      },
+      {
+        "override": "pre_lock_entity_and_taxonomy_changes",
+        "value": "handled inline (entity flags[] for Step-1; direct removals + rationale-doc entries) \u2014 proposals.json governs LOCKED-vocabulary evolution only",
+        "source": "reviews/vocab-0.1-proposals-review.md finding 1"
+      },
+      {
+        "override": "layer_2_type_kind_added",
+        "value": "struct<name:type, name:type, ...>",
+        "source": "Sprint 008 authored the parser; Sprint 009 declared it in v0.2; reviews/sdd-discipline-check-round-1.md \u00a73 surfaced the need"
+      }
+    ]
+  },
+  "_layer_2_note": {
+    "_step": "Step 3 close per BOOTSTRAP.md",
+    "n_tags_typed": 46,
+    "type_vocabulary": [
+      "str",
+      "int",
+      "float",
+      "bool",
+      "sha256",
+      "path",
+      "date_iso",
+      "datetime_utc",
+      "uuid",
+      "enum<...>",
+      "entity_ref<Layer-0-entity>",
+      "list<T>",
+      "dict<K,V>"
+    ],
+    "foreign_key_hits": 39,
+    "foreign_key_candidate_count": 39,
+    "foreign_key_resolution_rate": 1.0,
+    "halt_check_step_3": "FK resolution rate = 1.0. Threshold 0.70 per BOOTSTRAP Step 3. PASSES.",
+    "run_id_note": "run_id is typed as str, not entity_ref<TrainingRun>, because probe / calibrate / train / eval / simulate all mint their own run_ids and TrainingRun's definition is training-specific. Step 6 (Layer 6 \u2014 Runtime/Operator) may propose a broader Run entity to unify. Recorded as forward-commitment.",
+    "validator_extras_posture": "strict (per WORKING_AGREEMENT.md \u00a7 Vocabulary discipline). Payload fields not in the schema below raise ValueError at the emit call.",
+    "foreign_key_recount_note": "Round-4 recount: opaque identifiers (run_id, config_hash, git_sha, data_hash, sha256, commit_sha, revision_id, checkpoint_step, cost_calibration_run_id) are NOT FK candidates \u2014 they are values, not references to Layer-0 entities. FK candidates are fields whose semantics name a Layer-0 entity by identity."
+  },
+  "dual_contract_audit": {
+    "_layer": "Step 9 \u2014 Dual-Contract Audit. This project has no view category, so the classical view-behavior pairing is vacuous. The audit adapts to the observation contract that WORKING_AGREEMENT.md \u00a7 Observation contract environment names for non-UI projects: JSONL trace / metric artifact / file existence / process exit code / SDD trace log lines. Every behavior tag paired with an external verification anchor a Reviewer can check.",
+    "n_behavior_tags_audited": 55,
+    "pairings": [
+      {
+        "behavior_tag": "SESSION_INIT",
+        "anchor_kind": "jsonl_first_line + logbook_row_created",
+        "anchor": "First line of logs/{run_id}/signals.jsonl; new row in experiments/logbook.csv"
+      },
+      {
+        "behavior_tag": "SESSION_COMPLETE",
+        "anchor_kind": "jsonl_last_line + process_exit_code",
+        "anchor": "Last line of logs/{run_id}/signals.jsonl matches SESSION_COMPLETE; process exit_code returns as declared"
+      },
+      {
+        "behavior_tag": "CHANNEL_PROBED",
+        "anchor_kind": "manifest_entry",
+        "anchor": "data/manifests/channel_coverage.json contains entry with matching sample_date + channel + symbol"
+      },
+      {
+        "behavior_tag": "CHANNEL_COVERAGE_ASSESSED",
+        "anchor_kind": "manifest_verdict_field",
+        "anchor": "channel_coverage.json entry has verdict \u2208 {accepted, dropped, renegotiate}"
+      },
+      {
+        "behavior_tag": "CHANNEL_REJECTED",
+        "anchor_kind": "manifest_dropped_status",
+        "anchor": "channel_coverage.json entry marked dropped; channel absent from configs/channels/v1.yaml on next run"
+      },
+      {
+        "behavior_tag": "INGESTION_CALL_ISSUED",
+        "anchor_kind": "rate_limiter_counter",
+        "anchor": "IngestionClient token-bucket state; verifiable via /debug/rate endpoint or in-memory counter dump"
+      },
+      {
+        "behavior_tag": "INGESTION_CALL_CACHED",
+        "anchor_kind": "cache_file_read_stat",
+        "anchor": "parquet file at data/raw/{source}/{channel}/{symbol}/{yyyy-mm}.parquet accessed (mtime unchanged)"
+      },
+      {
+        "behavior_tag": "SOURCE_FALLBACK_TRIGGERED",
+        "anchor_kind": "subsequent_call_source_field",
+        "anchor": "next INGESTION_CALL_ISSUED for the (channel, symbol) carries source = to_source"
+      },
+      {
+        "behavior_tag": "RAW_OBSERVATION_WRITTEN",
+        "anchor_kind": "parquet_file_existence",
+        "anchor": "data/raw/{source}/{channel}/{symbol}/{yyyy-mm}.parquet exists and parses; rows contain value_time / released_at / known_at columns"
+      },
+      {
+        "behavior_tag": "REVISION_LANDED",
+        "anchor_kind": "parquet_row_with_revision_id",
+        "anchor": "row with new_revision_id present in the appropriate raw parquet"
+      },
+      {
+        "behavior_tag": "ALIGNMENT_RUN_STARTED",
+        "anchor_kind": "aligned_parquet_partial_written",
+        "anchor": "data/aligned/{run_id}.parquet exists (partial or full)"
+      },
+      {
+        "behavior_tag": "ALIGNMENT_ROW_EMITTED",
+        "anchor_kind": "row_at_timestamp_in_aligned_parquet",
+        "anchor": "aligned parquet contains a row whose timestamp matches the emission"
+      },
+      {
+        "behavior_tag": "ALIGNMENT_RUN_COMPLETED",
+        "anchor_kind": "aligned_parquet_final_written + row_count",
+        "anchor": "data/aligned/{run_id}.parquet complete; row count equals payload.total_rows"
+      },
+      {
+        "behavior_tag": "AS_OF_JOIN_MISS",
+        "anchor_kind": "missing_mask_bit_true",
+        "anchor": "aligned row at that timestamp has missing_mask__{channel}__{symbol} = True"
+      },
+      {
+        "behavior_tag": "TRADING_SESSION_STARTED",
+        "anchor_kind": "first_bar_timestamp_in_aligned",
+        "anchor": "aligned parquet contains a bar at first_bar_timestamp on session_date"
+      },
+      {
+        "behavior_tag": "TRADING_SESSION_ENDED",
+        "anchor_kind": "bar_count_matches",
+        "anchor": "aligned parquet's row count for session_date equals payload.bar_count"
+      },
+      {
+        "behavior_tag": "FEATURE_COMPUTED",
+        "anchor_kind": "feature_column_populated",
+        "anchor": "aligned or tokenized column {feature_name} at {timestamp} is non-null"
+      },
+      {
+        "behavior_tag": "NORMALIZER_FITTED",
+        "anchor_kind": "normalizers_pt_computed",
+        "anchor": "artifacts/{run_id}/normalizers.pt in-memory tensor state is set (verifiable via load)"
+      },
+      {
+        "behavior_tag": "NORMALIZER_STATE_WRITTEN",
+        "anchor_kind": "normalizers_pt_file_existence + sha256",
+        "anchor": "artifacts/{run_id}/normalizers.pt exists; sha256 matches payload"
+      },
+      {
+        "behavior_tag": "BUCKETIZER_FITTED",
+        "anchor_kind": "bucketizer_in_memory_state",
+        "anchor": "ReturnBucketizer.boundaries is an np.array of length V-1, monotone"
+      },
+      {
+        "behavior_tag": "BUCKET_STATS_WRITTEN",
+        "anchor_kind": "bucket_stats_json_file + schema",
+        "anchor": "artifacts/tokenizer/bucket_stats.json exists; keys 0..V-1; per-entry schema matches"
+      },
+      {
+        "behavior_tag": "BUCKET_ASSIGNED",
+        "anchor_kind": "tokenized_targets_field",
+        "anchor": "data/tokenized/{run_id}.pt targets[t] == bucket_id for that timestamp"
+      },
+      {
+        "behavior_tag": "MARKET_STATE_TOKEN_EMITTED",
+        "anchor_kind": "in_memory_tensor_shape",
+        "anchor": "at position t, the embedder returns a tensor of shape [d_model]; verifiable by unit test"
+      },
+      {
+        "behavior_tag": "CONFIG_RESOLVED",
+        "anchor_kind": "resolved_config_yaml_saved + hash",
+        "anchor": "artifacts/{run_id}/config.yaml matches payload.config_hash"
+      },
+      {
+        "behavior_tag": "CONFIG_VALIDATION_FAILED",
+        "anchor_kind": "no_downstream_artifacts + stderr_error",
+        "anchor": "artifacts/{run_id}/ contains no checkpoint; stderr shows Pydantic error message"
+      },
+      {
+        "behavior_tag": "WINDOW_SAMPLED",
+        "anchor_kind": "in_memory_dataset_sampling_counter",
+        "anchor": "PriceSpaceDataset.__getitem__ counter incremented"
+      },
+      {
+        "behavior_tag": "CHECKPOINT_WRITTEN",
+        "anchor_kind": "checkpoint_pt_file + val_metrics_field",
+        "anchor": "artifacts/{run_id}/step_{step}.pt exists; loaded state has val_metrics attribute matching payload"
+      },
+      {
+        "behavior_tag": "METRIC_SNAPSHOT_WRITTEN",
+        "anchor_kind": "metrics_json_file + keys",
+        "anchor": "artifacts/{run_id}/metrics.json exists; keys and value ranges match declared schema"
+      },
+      {
+        "behavior_tag": "REGIME_LABELS_FROZEN",
+        "anchor_kind": "regime_thresholds_json_or_config",
+        "anchor": "thresholds committed to config or artifacts/{run_id}/regime_labels.json"
+      },
+      {
+        "behavior_tag": "COST_CALIBRATION_FITTED",
+        "anchor_kind": "cost_calibration_artifacts_both_present",
+        "anchor": "both artifacts/cost_calibration/{spread_scaler,kappa}.json exist"
+      },
+      {
+        "behavior_tag": "SPREAD_SCALER_WRITTEN",
+        "anchor_kind": "spread_scaler_json_file + sha256",
+        "anchor": "artifacts/cost_calibration/spread_scaler.json exists; sha256 matches"
+      },
+      {
+        "behavior_tag": "KAPPA_WRITTEN",
+        "anchor_kind": "kappa_json_file + sha256",
+        "anchor": "artifacts/cost_calibration/kappa.json exists; sha256 matches"
+      },
+      {
+        "behavior_tag": "SIM_RUN_STARTED",
+        "anchor_kind": "sim_result_partial + checkpoint_load",
+        "anchor": "SimResult record created; checkpoint at payload.checkpoint_step loaded (verifiable via in-memory model.state_dict hash)"
+      },
+      {
+        "behavior_tag": "BAR_PROCESSED",
+        "anchor_kind": "sim_result_per_bar_decisions_row",
+        "anchor": "SimResult.per_bar_decisions contains a row for that timestamp"
+      },
+      {
+        "behavior_tag": "PREDICTION_EMITTED",
+        "anchor_kind": "sim_result_prediction_row",
+        "anchor": "SimResult.per_bar_decisions row has expected_return + p_up matching payload"
+      },
+      {
+        "behavior_tag": "DECISION_MADE",
+        "anchor_kind": "sim_result_decision_row",
+        "anchor": "SimResult.per_bar_decisions row has direction + size matching payload"
+      },
+      {
+        "behavior_tag": "POSITION_OPENED",
+        "anchor_kind": "trade_ledger_open_row",
+        "anchor": "SimResult.trades contains an open row at timestamp"
+      },
+      {
+        "behavior_tag": "POSITION_CLOSED",
+        "anchor_kind": "trade_ledger_close_row + pnl_field",
+        "anchor": "SimResult.trades close row has matching direction / size / pnl_net"
+      },
+      {
+        "behavior_tag": "TRADE_LEDGERED",
+        "anchor_kind": "trade_ledger_paired_row",
+        "anchor": "SimResult.trades has a paired (entry, exit) row keyed by trade_id"
+      },
+      {
+        "behavior_tag": "SIGNAL_DROPPED",
+        "anchor_kind": "no_position_change + counter_incremented",
+        "anchor": "no POSITION_OPENED at that timestamp; SimResult.dropped_signals counter incremented"
+      },
+      {
+        "behavior_tag": "SIM_RUN_COMPLETED",
+        "anchor_kind": "sim_result_json_file + all_summary_fields",
+        "anchor": "SimResult JSON written; sharpe_point / sharpe_se / max_drawdown / capacity_usd all present"
+      },
+      {
+        "behavior_tag": "TEST_LOOK_REGISTERED",
+        "anchor_kind": "test_looks_log_line_appended",
+        "anchor": "experiments/test_looks.log gained a line with date + run_id + reason + commit_sha"
+      },
+      {
+        "behavior_tag": "TEST_LOOK_BUDGET_EXHAUSTED",
+        "anchor_kind": "stderr_refusal_message + no_test_data_read",
+        "anchor": "stderr shows budget-exhausted refusal; no new row in data/aligned/ touched the test range"
+      },
+      {
+        "behavior_tag": "TRAINING_DIVERGED",
+        "anchor_kind": "no_checkpoint_written_after + stderr_traceback",
+        "anchor": "artifacts/{run_id}/ has no checkpoint files at or beyond payload.step; stderr shows the traceback"
+      },
+      {
+        "behavior_tag": "MANIFEST_STALE_OR_MISSING",
+        "anchor_kind": "no_aligned_parquet + stderr_hard_fail",
+        "anchor": "data/aligned/{run_id}.parquet absent; stderr shows the align.py hard-fail message"
+      },
+      {
+        "behavior_tag": "INGESTION_CALL_RETRIED",
+        "anchor_kind": "http_log_or_retry_counter",
+        "anchor": "IngestionClient retry counter incremented; if the run persists HTTP logs, matching 429/5xx entry"
+      },
+      {
+        "behavior_tag": "FEATURE_COMPUTATION_FAILED",
+        "anchor_kind": "nan_in_tokenized_or_dropped_row",
+        "anchor": "the timestamp shows a NaN in the aligned parquet's feature column or is masked in data/tokenized/{run_id}.pt mask"
+      }
+    ],
+    "gaps": [],
+    "no_view_category_rationale": "This is a Data science / ML training + CLI project. No UI-touching sprints exist. The classical view-tag-per-behavior-tag pairing (per grammar/BOOTSTRAP.md Step 9) is defined for UI-touching projects. Here every behavior emission is verifiable via signal-in-trace + artifact-on-disk + exit-code, per WORKING_AGREEMENT.md \u00a7 Observation contract environment."
+  },
+  "version_metadata": {
+    "_layer": "Layer 9 \u2014 Version. Lock metadata for v0.7.",
+    "version_id": "0.7",
+    "locked_at": "2026-08-17",
+    "locked_by": "Architect (Peter Laffey), v0.7 lock 2026-08-17 per Sprint 084",
+    "prior_version": "0.6",
+    "migration_proposals": [],
+    "_note": "v0.7 locked 2026-08-17. Delta from v0.6: six new required payload fields on CONFIG_RESOLVED (d_model, n_layers, n_heads, fusion, mixer_dim, mixer_n_heads); one new required payload field on TOKENIZED_ARTIFACT_WRITTEN (normalized). Zero tags added; zero tags removed. See signals/0.7-rationale.md.",
+    "version": "0.7"
+  }
+}

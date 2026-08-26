@@ -104,6 +104,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Sprint 065: acknowledge reading a held-out features parquet.",
     )
+    # Sprint 090: bucket-count override (roadmap 072). None -> use config.
+    parser.add_argument(
+        "--n-buckets",
+        type=int,
+        choices=(16, 32, 64),
+        default=None,
+        help="Override configs/experiment/v1.json's n_buckets for this run.",
+    )
     args = parser.parse_args(argv)
 
     # Sprint 065: refuse to tokenize a held-out features parquet without ack.
@@ -139,6 +147,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"tokenize: config invalid: {ex}", file=sys.stderr)
             return 1
         cfg = config_result.config
+
+        # Sprint 090: --n-buckets overlay; re-runs Pydantic so an off-spec
+        # value fails loud even if it slipped through argparse.
+        if args.n_buckets is not None:
+            cfg = cfg.__class__.model_validate(
+                {**cfg.model_dump(), "n_buckets": args.n_buckets}
+            )
 
         pt_output_path: Path | None = None
         try:
@@ -221,8 +236,13 @@ def main(argv: list[str] | None = None) -> int:
                         emitter,
                         run_id=run_id,
                     )
-                    # Clean up the intermediate.
+                    # Clean up the intermediate + its Sprint 078 sha256 sidecar.
+                    # The intermediate is a pre-norm scratch artifact; the final
+                    # .pt written below carries the audit-trail sha256 for the
+                    # real payload.
                     intermediate.unlink(missing_ok=True)
+                    sidecar = intermediate.with_suffix(intermediate.suffix + ".sha256")
+                    sidecar.unlink(missing_ok=True)
                 pt_output_path = run_tokenizer_pt(
                     features_path=args.features,
                     output_dir=args.output_dir,

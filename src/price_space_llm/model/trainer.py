@@ -35,6 +35,8 @@ from price_space_llm.model.dataset import (
     split_tokens,
 )
 from price_space_llm.model.transformer import (
+    N_QUANTILES,
+    QUANTILE_LEVELS,
     MarketStateTransformer,
     MarketStateTransformerConfig,
     PriceSpaceLLM,
@@ -341,6 +343,10 @@ def _split_artifact(
     train = TokenizedArtifact(
         features={k: v[:n_train] for k, v in artifact.features.items()},
         targets=artifact.targets[:n_train],
+        # Sprint 089: preserve raw_targets across the split.
+        raw_targets=(
+            artifact.raw_targets[:n_train] if artifact.raw_targets is not None else None
+        ),
         vol=artifact.vol[:n_train],
         timestamps=artifact.timestamps[:n_train],
         is_overnight_gap=(
@@ -353,6 +359,9 @@ def _split_artifact(
     val = TokenizedArtifact(
         features={k: v[val_start:] for k, v in artifact.features.items()},
         targets=artifact.targets[val_start:],
+        raw_targets=(
+            artifact.raw_targets[val_start:] if artifact.raw_targets is not None else None
+        ),
         vol=artifact.vol[val_start:],
         timestamps=artifact.timestamps[val_start:],
         is_overnight_gap=(
@@ -377,13 +386,45 @@ def _compute_val_metrics_feats(
     model.eval()
     val_device = next(model.parameters()).device
     vocab_size = model.config.vocab_size
+    patch_size = model.config.patch_size
+    head_type = model.config.head_type
+    # Sprint 089: quantile head reports pinball loss in `val_nll` and zeros
+    # every other categorical metric; the sprint card names this as an honest
+    # gap until quantile-specific metrics land (Sprint 090+ candidate).
+    if head_type == "quantile":
+        pinball_terms: list[torch.Tensor] = []
+        with torch.no_grad():
+            for _ in range(n_val_batches):
+                batch: WindowBatchFeats = val_sampler.sample()
+                feats = {k: v.to(val_device) for k, v in batch.feats.items()}
+                assert batch.raw_targets is not None
+                raw = _patch_targets(batch.raw_targets.to(val_device), patch_size)
+                preds = model(feats)  # (B, T', N_QUANTILES)
+                pinball_terms.append(
+                    pinball_loss(
+                        preds.reshape(-1, N_QUANTILES),
+                        raw.reshape(-1),
+                        QUANTILE_LEVELS,
+                    )
+                )
+        model.train()
+        val_pinball = float(torch.stack(pinball_terms).mean().item())
+        return {
+            "val_nll": val_pinball,  # pinball loss reuses the slot
+            "val_ece": 0.0,
+            "val_brier": 0.0,
+            "val_rps": 0.0,
+            "val_dir_acc": 0.0,
+            "val_top1": 0.0,
+            "val_top3": 0.0,
+        }
     all_probs: list[torch.Tensor] = []
     all_targets: list[torch.Tensor] = []
     with torch.no_grad():
         for _ in range(n_val_batches):
-            batch: WindowBatchFeats = val_sampler.sample()
+            batch = val_sampler.sample()
             feats = {k: v.to(val_device) for k, v in batch.feats.items()}
-            targets_dev = batch.targets.to(val_device)
+            targets_dev = _patch_targets(batch.targets.to(val_device), patch_size)
             logits = model(feats)
             probs = F.softmax(logits, dim=-1).reshape(-1, vocab_size)
             targets = targets_dev.reshape(-1)
@@ -408,6 +449,88 @@ def _compute_val_metrics_feats(
     }
 
 
+def pinball_loss(
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    quantile_levels: tuple[float, ...],
+) -> torch.Tensor:
+    """Sprint 089: mean pinball loss across quantiles.
+
+    `preds` shape `[N, Q]` — Q predicted quantile values per example.
+    `targets` shape `[N]` — float raw log-return; NaN entries skip the loss.
+    `quantile_levels` — tuple of Q levels in (0, 1). Order matches `preds`
+    columns.
+
+    Loss per (example, quantile): `max(q * (t - p), (q - 1) * (t - p))`.
+    Returned scalar = mean over valid (non-NaN target) examples and all
+    quantiles. Raises `ValueError` if every target is NaN (no supervision).
+    """
+    q_tensor = torch.tensor(
+        quantile_levels, dtype=preds.dtype, device=preds.device
+    )
+    valid = ~torch.isnan(targets)
+    if not bool(valid.any()):
+        raise ValueError("pinball_loss: every target is NaN; no supervision")
+    valid_preds = preds[valid]  # [N_valid, Q]
+    valid_targets = targets[valid].unsqueeze(1)  # [N_valid, 1]
+    delta = valid_targets - valid_preds  # [N_valid, Q]
+    loss_terms = torch.maximum(q_tensor * delta, (q_tensor - 1.0) * delta)
+    return loss_terms.mean()
+
+
+def _patch_targets(targets: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """Sprint 087: slice sampler targets to match a patched model's shrunk output.
+
+    The sampler returns `targets[start+1 : start+1+context_len]` — indices
+    `start+1..start+T` for a length-T input. Under patch_size=p, model output
+    at patched position `q` (packing input bars `q*p..q*p+p-1`) is scored
+    against the bar immediately after the last packed bar, i.e., input index
+    `(q+1)*p` in the original bar sequence, which is slice index `(q+1)*p - 1
+    = p-1, 2p-1, 3p-1, ...` in the sampler's target tensor. So the correct
+    slice is `targets[:, p-1::p]`.
+
+    patch_size == 1 is the identity (no reshape).
+
+    Worked example (Sprint 095, from review 074-094 § 7.4):
+        patch_size=4, context_len=64 → model output has 16 patched positions.
+        _patch_targets(targets[:, :64], 4) selects targets at slice indices
+        [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63].
+        Patched position q=0 packs input bars [0..3]; its target = input bar 4,
+        which is slice index 3 (= (0+1)*4 - 1) in the sampler's shift-by-one
+        target tensor. Patched position q=15 packs input bars [60..63]; its
+        target = input bar 64, which is slice index 63 (= (15+1)*4 - 1). Chain
+        holds; `test_patch_targets_alignment_invariant_matches_paper_indexing`
+        pins the arithmetic against a known-shape target.
+    """
+    if patch_size == 1:
+        return targets
+    return targets[:, patch_size - 1 :: patch_size]
+
+
+class QuantileHeadRequiresRawTargets(RuntimeError):
+    """Sprint 089: raised by `run_training_feats` when
+    `model_cfg.head_type == 'quantile'` and the artifact was tokenized without
+    a `raw_targets` field (pre-Sprint-088 artifact or synthetic fixture with
+    `raw_targets=None`). Pinball loss consumes float raw log returns; bucket
+    IDs will not do. Same fail-loud shape as Sprint 084's
+    `UnnormalizedArtifactRefused`.
+    """
+
+
+class UnnormalizedArtifactRefused(RuntimeError):
+    """Sprint 084 raised this for `mixer` fusion. Sprint 113 broadened it to
+    every fusion — the Sprint 084 comment claimed 'sum fusion tolerates
+    un-normalized input via internal LayerNorms and is unaffected'; the
+    Sprint 113 sum-normalized vs sum-unnormalized comparison proved that
+    wrong. Under unnormalized data, sum fusion silently drowns non-target
+    channels because raw dollar_volume (mean ~61M, std ~264M) dominates the
+    per-channel Linear projections. Target-only ablation produced results
+    bit-identical to full-channel ablation under sum-unnormalized — non-target
+    channels contributed zero. Normalizing the artifact recovers full
+    multi-channel signal and drops pooled val_nll by 0.21 nats at step 2000.
+    """
+
+
 def run_training_feats(
     *,
     artifact: TokenizedArtifact,
@@ -423,7 +546,27 @@ def run_training_feats(
     Same emit surface as `run_training`: WINDOW_SAMPLED per step, TRAINING_STEP_COMPLETED
     per step, CHECKPOINT_WRITTEN at every eval, EPOCH_COMPLETED at close, TRAINING_DIVERGED
     on NaN/grad-explosion. Reuses `TrainerConfig`/`TrainerResult`/`TrainingDiverged`.
+
+    Sprint 084 refused mixer on un-normalized artifacts. Sprint 113 broadened
+    the guard to every fusion — Sprint 113-A and Sprint 113-C together proved
+    sum fusion silently produces target-only-equivalent output on un-normalized
+    data (raw dollar_volume scale drowns per-channel Linear projections).
     """
+    if not artifact.meta.get("normalized", False):
+        raise UnnormalizedArtifactRefused(
+            f"run_training_feats(fusion='{model_cfg.fusion}') requires a "
+            "normalizer-applied artifact (artifact.meta['normalized'] == True). "
+            "Regenerate via `scripts/bucketize.py --fit-normalizer --format pt`. "
+            "Sprint 113 demonstrated un-normalized artifacts silently drown "
+            "non-target channels under sum fusion; the model learns as if "
+            "target-only. Not a training crash; a silent quality collapse."
+        )
+    if model_cfg.head_type == "quantile" and artifact.raw_targets is None:
+        raise QuantileHeadRequiresRawTargets(
+            "run_training_feats(head_type='quantile') requires artifact.raw_targets. "
+            "Regenerate via `scripts/bucketize.py --format pt` (Sprint 088+ stamps "
+            "raw_targets automatically) before training the quantile head."
+        )
     train_artifact, val_artifact = _split_artifact(
         artifact, trainer_cfg.train_frac, embargo=trainer_cfg.embargo
     )
@@ -490,22 +633,43 @@ def run_training_feats(
             context_len=str(model_cfg.context_len),
         )
         feats = {k: v.to(torch_device) for k, v in batch.feats.items()}
-        targets = batch.targets.to(torch_device)
+        # Sprint 087: patch-aware target slicing so the loss matches the
+        # patched model's shrunk output sequence.
+        targets = _patch_targets(batch.targets.to(torch_device), model_cfg.patch_size)
+        # Sprint 089: quantile head uses raw float targets + pinball loss;
+        # categorical head keeps cross-entropy on bucket IDs.
+        raw_targets_patched: torch.Tensor | None = None
+        if model_cfg.head_type == "quantile":
+            assert batch.raw_targets is not None  # guarded above
+            raw_targets_patched = _patch_targets(
+                batch.raw_targets.to(torch_device), model_cfg.patch_size
+            )
+
+        def _loss_from_logits(
+            preds: torch.Tensor,
+            targets_cat: torch.Tensor = targets,
+            raw_patched: torch.Tensor | None = raw_targets_patched,
+        ) -> torch.Tensor:
+            if model_cfg.head_type == "quantile":
+                assert raw_patched is not None
+                return pinball_loss(
+                    preds.reshape(-1, N_QUANTILES),
+                    raw_patched.reshape(-1),
+                    QUANTILE_LEVELS,
+                )
+            return F.cross_entropy(
+                preds.reshape(-1, model_cfg.vocab_size),
+                targets_cat.reshape(-1),
+                ignore_index=-100,
+            )
+
         if use_bf16:
             with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16):
                 logits = model(feats)
-                loss = F.cross_entropy(
-                    logits.reshape(-1, model_cfg.vocab_size),
-                    targets.reshape(-1),
-                    ignore_index=-100,
-                )
+                loss = _loss_from_logits(logits)
         else:
             logits = model(feats)
-            loss = F.cross_entropy(
-                logits.reshape(-1, model_cfg.vocab_size),
-                targets.reshape(-1),
-                ignore_index=-100,
-            )
+            loss = _loss_from_logits(logits)
         train_loss = float(loss.item())
 
         if math.isnan(train_loss) or math.isinf(train_loss):
@@ -568,6 +732,11 @@ def run_training_feats(
                         "n_layers": model_cfg.n_layers,
                         "n_heads": model_cfg.n_heads,
                         "channel_dims": model_cfg.channel_dims,
+                        # Sprint 115: fusion + mixer settings so evaluator can
+                        # rebuild the correct model shape from the checkpoint alone.
+                        "fusion": model_cfg.fusion,
+                        "mixer_dim": model_cfg.mixer_dim,
+                        "mixer_n_heads": model_cfg.mixer_n_heads,
                     },
                 },
                 ckpt_path,

@@ -30,17 +30,25 @@ from price_space_llm.model.trainer import (
     run_training_feats,
 )
 from price_space_llm.model.transformer import (
+    N_QUANTILES,
+    QUANTILE_LEVELS,
+    ChannelMixerEmbedder,
     MarketStateEmbedder,
     MarketStateTransformer,
     MarketStateTransformerConfig,
+    PatchEmbedder,
     PriceSpaceLLM,
     TransformerConfig,
 )
 
 __all__ = [
+    "N_QUANTILES",
+    "QUANTILE_LEVELS",
+    "ChannelMixerEmbedder",
     "MarketStateEmbedder",
     "MarketStateTransformer",
     "MarketStateTransformerConfig",
+    "PatchEmbedder",
     "PriceSpaceLLM",
     "TokenizedArtifact",
     "TrainerResult",

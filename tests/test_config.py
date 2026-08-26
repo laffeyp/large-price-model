@@ -137,3 +137,127 @@ def test_load_config_hash_is_deterministic(tmp_path: Path):
     r1 = load_config(path, emitter=e, run_id="a", git_sha="0" * 40)
     r2 = load_config(path, emitter=e, run_id="b", git_sha="0" * 40)
     assert r1.config_hash == r2.config_hash
+
+
+# Sprint 084 (v0.7): CONFIG_RESOLVED payload extensions -------------------
+
+
+def test_load_config_config_resolved_carries_model_architecture(tmp_path: Path):
+    """Sprint 084: CONFIG_RESOLVED payload includes the six new fields with defaults."""
+    e = _fresh_emitter()
+    path = _write(tmp_path, _valid_body())
+    load_config(path, emitter=e, run_id="v07-defaults", git_sha="0" * 40)
+    resolved = next(s for s in e.snapshot() if s.tag == "CONFIG_RESOLVED")
+    p = resolved.payload
+    assert p["d_model"] == "64"
+    assert p["n_layers"] == "4"
+    assert p["n_heads"] == "4"
+    assert p["fusion"] == "sum"
+    assert p["mixer_dim"] == 96
+    assert p["mixer_n_heads"] == 2
+
+
+def test_load_config_config_resolved_reflects_overrides(tmp_path: Path):
+    """Sprint 084: overrides land in the emit payload."""
+    e = _fresh_emitter()
+    path = _write(tmp_path, _valid_body())
+    load_config(
+        path,
+        emitter=e,
+        run_id="v07-mixer",
+        git_sha="0" * 40,
+        d_model=128,
+        n_layers=4,
+        n_heads=2,
+        fusion="mixer",
+        mixer_dim=96,
+        mixer_n_heads=2,
+    )
+    resolved = next(s for s in e.snapshot() if s.tag == "CONFIG_RESOLVED")
+    p = resolved.payload
+    assert p["d_model"] == "128"
+    assert p["n_heads"] == "2"
+    assert p["fusion"] == "mixer"
+
+
+# Sprint 073: model-size configs (Phase E, roadmap 067) --------------------
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_SPEC_SIZES = {
+    "xs": {"d_model": 128, "n_layers": 4, "n_heads": 2},
+    "sm": {"d_model": 192, "n_layers": 6, "n_heads": 3},
+    "md": {"d_model": 384, "n_layers": 8, "n_heads": 6},
+    "lg": {"d_model": 512, "n_layers": 8, "n_heads": 8},
+}
+
+
+def test_model_size_config_rejects_off_spec_d_model(tmp_path: Path):
+    from price_space_llm.config import (
+        ModelSizeConfigValidationFailed,
+        load_model_size_config,
+    )
+
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({"d_model": 256, "n_layers": 4, "n_heads": 4}))
+    with pytest.raises(ModelSizeConfigValidationFailed):
+        load_model_size_config(path)
+
+
+def test_model_size_config_accepts_all_four_spec_sizes():
+    """Every canonical file on disk parses; head_dim = d_model / n_heads = 64."""
+    from price_space_llm.config import load_model_size_config
+
+    for name, expected in _SPEC_SIZES.items():
+        cfg = load_model_size_config(REPO_ROOT / "configs" / "model" / f"{name}.json")
+        assert cfg.d_model == expected["d_model"], name
+        assert cfg.n_layers == expected["n_layers"], name
+        assert cfg.n_heads == expected["n_heads"], name
+        assert cfg.d_model % cfg.n_heads == 0, name
+        assert cfg.d_model // cfg.n_heads == 64, name
+
+
+def test_load_model_size_config_round_trips(tmp_path: Path):
+    from price_space_llm.config import load_model_size_config
+
+    body = {"d_model": 128, "n_layers": 4, "n_heads": 2}
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps(body))
+    cfg = load_model_size_config(path)
+    assert cfg.model_dump() == body
+
+
+# Sprint 074: context-length configs (Phase E, roadmap 068) ---------------
+
+_SPEC_CONTEXTS = (64, 128, 256, 512)
+
+
+def test_context_len_config_rejects_off_spec_value(tmp_path: Path):
+    from price_space_llm.config import (
+        ContextLenConfigValidationFailed,
+        load_context_len_config,
+    )
+
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({"context_len": 100}))
+    with pytest.raises(ContextLenConfigValidationFailed):
+        load_context_len_config(path)
+
+
+def test_context_len_config_accepts_all_four_spec_values():
+    """Every canonical file on disk parses; value matches filename."""
+    from price_space_llm.config import load_context_len_config
+
+    for n in _SPEC_CONTEXTS:
+        cfg = load_context_len_config(REPO_ROOT / "configs" / "context" / f"{n}.json")
+        assert cfg.context_len == n, n
+
+
+def test_load_context_len_config_round_trips(tmp_path: Path):
+    from price_space_llm.config import load_context_len_config
+
+    body = {"context_len": 128}
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps(body))
+    cfg = load_context_len_config(path)
+    assert cfg.model_dump() == body

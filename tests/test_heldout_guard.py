@@ -8,6 +8,7 @@ import pytest
 
 from price_space_llm.heldout_guard import (
     HeldoutReadRefused,
+    UnrecognizedArtifactShape,
     guard_heldout_parquet,
     parquet_range_starts_in_heldout,
 )
@@ -30,10 +31,36 @@ def test_pre_2024_align_is_not_heldout():
     )
 
 
-def test_unrelated_filename_is_not_heldout():
-    """Guard only fires on files it can positively identify as aligned."""
-    assert not parquet_range_starts_in_heldout(Path("some_other.parquet"))
-    assert not parquet_range_starts_in_heldout(Path("checkpoint.pt"))
+def test_unrelated_filename_raises_by_default():
+    """Sprint 081: unknown filenames raise; caller must opt into the fallback."""
+    with pytest.raises(UnrecognizedArtifactShape, match="known dated-artifact"):
+        parquet_range_starts_in_heldout(Path("some_other.parquet"))
+    with pytest.raises(UnrecognizedArtifactShape):
+        parquet_range_starts_in_heldout(Path("checkpoint.pt"))
+
+
+def test_unrelated_filename_permits_with_allow_unrecognized():
+    """`allow_unrecognized=True` falls back to the pre-Sprint-081 permit behavior."""
+    assert not parquet_range_starts_in_heldout(
+        Path("some_other.parquet"), allow_unrecognized=True
+    )
+    assert not parquet_range_starts_in_heldout(
+        Path("checkpoint.pt"), allow_unrecognized=True
+    )
+
+
+def test_tokens_pt_versioned_filename_detected_as_heldout():
+    """Sprint 081: tokens.<run_id>.pt on the Sprint 078 shape is a known pattern."""
+    heldout = Path(
+        "tokens.tokenize-features-align-2024-01-2025-06-0000000000000000-"
+        "0000000000000000-0000000000000000.pt"
+    )
+    training = Path(
+        "tokens.tokenize-features-align-2015-01-2022-12-0000000000000000-"
+        "0000000000000000-0000000000000000.pt"
+    )
+    assert parquet_range_starts_in_heldout(heldout)
+    assert not parquet_range_starts_in_heldout(training)
 
 
 def test_guard_raises_on_heldout_without_flag():

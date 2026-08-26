@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Sprint 064 pre-commit / commit-msg hook per tech-arch §13.
+# Sprint 106 fixed the double-redirection bug that made the Sprint 064 script
+# always exit nonzero with a NameError on staged filenames.
 #
 # Install by symlinking to `.git/hooks/commit-msg`:
 #     ln -sf "$(pwd)/scripts/check_test_look.sh" .git/hooks/commit-msg
@@ -32,9 +34,11 @@ if [[ ! -x "$PYTHON" ]]; then
     PYTHON="$(command -v python3)"
 fi
 
-STAGED_FILES="$(git diff --cached --name-only --diff-filter=ACM || true)"
-
-"$PYTHON" - "$COMMIT_MSG_FILE" <<'PYEOF' <<<"$STAGED_FILES"
+# Sprint 106 rewrite: pipe staged files on stdin, pass commit-msg file as argv.
+# The prior Sprint 064 form used `<<PYEOF ... <<<"$STAGED_FILES"` which is two
+# redirections on one command; bash keeps only the last, so the heredoc script
+# never reached Python and the file list was executed as source code.
+git diff --cached --name-only --diff-filter=ACM 2>/dev/null | "$PYTHON" -c '
 import sys
 from pathlib import Path
 
@@ -42,12 +46,11 @@ from price_space_llm.hooks import check_commit_for_test_look
 
 commit_msg_file = Path(sys.argv[1])
 commit_message = commit_msg_file.read_text(encoding="utf-8", errors="ignore")
-staged_lines = [line.strip() for line in sys.stdin.readlines()]
-staged_files = [Path(line) for line in staged_lines if line]
+staged_files = [Path(line.strip()) for line in sys.stdin if line.strip()]
 
 should_block, reason = check_commit_for_test_look(commit_message, staged_files)
 if should_block:
     print(f"check_test_look: BLOCKING commit. {reason}", file=sys.stderr)
     sys.exit(1)
 sys.exit(0)
-PYEOF
+' "$COMMIT_MSG_FILE"

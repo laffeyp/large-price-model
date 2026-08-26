@@ -354,7 +354,7 @@ def test_run_evaluation_feats_end_to_end(tmp_path: Path):
         "is_overnight_gap": None,
         "mask": torch.ones(n_rows, dtype=torch.bool),
         "channel_names": ("target__SPY",),
-        "meta": {"run_id": "test"},
+        "meta": {"run_id": "test", "mask_semantics": "target_valid_v075"},
     }
     tokens_pt = tmp_path / "tokens.pt"
     torch.save(artifact_payload, tokens_pt)
@@ -390,3 +390,45 @@ def test_run_evaluation_feats_end_to_end(tmp_path: Path):
     assert "METRIC_COMPUTED" in tags
     assert "BUCKET_FREQUENCY_DRIFT_MEASURED" in tags
     assert "METRIC_SNAPSHOT_WRITTEN" in tags
+
+
+# Sprint 082: ignore-index filter in _metrics_over_positions --------------
+
+
+def test_metrics_over_positions_filters_ignore_index():
+    """Sprint 082: last-position targets == -100 are skipped before metric compute.
+
+    Pre-Sprint-082 behavior counted -100 rows in every metric denominator with
+    a garbage bucket id, silently deflating top-1/top-3/dir_acc and producing
+    a bad NLL via `probs.gather(1, -100)` picking the wrong row.
+    """
+    import torch as _torch
+
+    from price_space_llm.evaluation.evaluate import _metrics_over_positions
+
+    # 4 windows by context_len 3 by vocab 8. Uniform probs so top-1 == argmax deterministic.
+    probs = _torch.full((4, 3, 8), 1.0 / 8)
+    # Sharpen the last-position dist so top-1 predicts bucket 2 on every window.
+    probs[:, -1, :] = 0.0
+    probs[:, -1, 2] = 1.0
+    # Targets at last position: two match (2), one -100 (should skip), one no-match (5).
+    targets = _torch.zeros((4, 3), dtype=_torch.long)
+    targets[:, -1] = _torch.tensor([2, -100, 2, 5])
+    metrics = _metrics_over_positions(probs, targets, positions=[0, 1, 2, 3], vocab_size=8)
+    # After filter: 3 valid targets; top-1 hits 2 of 3.
+    assert metrics.n_examples == 3
+    assert metrics.top1 == pytest.approx(2.0 / 3.0)
+
+
+def test_metrics_over_positions_all_ignore_index_returns_empty():
+    """Every valid position has target == -100 → n_examples = 0 clean, no errors."""
+    import torch as _torch
+
+    from price_space_llm.evaluation.evaluate import _metrics_over_positions
+
+    probs = _torch.full((2, 3, 8), 1.0 / 8)
+    targets = _torch.full((2, 3), -100, dtype=_torch.long)
+    metrics = _metrics_over_positions(probs, targets, positions=[0, 1], vocab_size=8)
+    assert metrics.n_examples == 0
+    assert metrics.top1 == 0.0
+    assert metrics.nll == 0.0

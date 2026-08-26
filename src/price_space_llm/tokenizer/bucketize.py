@@ -10,6 +10,7 @@ Values outside all edges are clamped to `0` or `n_buckets - 1`.
 """
 
 import hashlib
+import io
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -21,6 +22,7 @@ import numpy as np
 import polars as pl
 import torch
 
+from price_space_llm.artifacts import write_versioned
 from price_space_llm.signals import StrictSignalEmitter
 
 if TYPE_CHECKING:
@@ -55,6 +57,20 @@ class BucketStats:
     edges: tuple[float, ...]  # len == n_buckets - 1, strictly increasing
     # Sprint 056: per-bucket statistics per spec § 7.1. Length == n_buckets.
     per_bucket: tuple[BucketRow, ...] = ()
+
+    @property
+    def train_means_tensor(self) -> "torch.Tensor":
+        """Sprint 103 (review §3.4): shared accessor for the [V] train-means tensor.
+
+        Every simulator walker was constructing this from `per_bucket` at
+        function entry. Centralizes the shape + dtype convention. Not cached
+        on the instance because frozen slots dataclasses do not accept the
+        descriptor storage; the caller reads it into a local once per run.
+        """
+        import torch as _torch
+        return _torch.tensor(
+            [row.train_mean for row in self.per_bucket], dtype=_torch.float32
+        )
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -467,12 +483,16 @@ def run_tokenizer_pt(
       Sprint 049 hasn't run against this features parquet yet.
     - `timestamps[t]` is UTC Unix seconds from `grid_ts`.
     - `is_overnight_gap` is `None` until Sprint 055 (session flags) lands.
-    - `mask[t]` is True iff every feature column across every channel is
-      non-null at row `t`.
+    - `mask[t]` (Sprint 075 semantic) is True iff row `t` is a valid training
+      example for the target: every target feature column non-null AND
+      `targets[t] != -100`. Prior Sprint 052 semantic ("every feature column
+      across every channel non-null") collapsed to all-False on the real
+      corpus because sparse event and macro channels poisoned the check.
+      `meta["mask_semantics"] = "target_valid_v075"` stamps the new shape.
     """
-    del emitter  # Sprint 052 defers a dedicated emit; sha256 sidecar carries
-    # the auditability. Sprint 053 or a v0.5 vocab bump may add
-    # TOKENIZED_ARTIFACT_WRITTEN if needed.
+    # Sprint 080 (v0.6): TOKENIZED_ARTIFACT_WRITTEN fires at the end of the
+    # write path. Sprint 052 deferred a dedicated emit; Sprint 078 landed the
+    # versioned write; Sprint 080 lands the signal-side surface.
 
     features = pl.read_parquet(features_path)
     n_rows = features.height
@@ -503,6 +523,14 @@ def run_tokenizer_pt(
             targets_np[i] = bid
     targets_t = torch.from_numpy(targets_np)
 
+    # Sprint 088: parallel float raw_targets for the quantile-head ablation.
+    # NaN where log_return is null (same rows where targets == -100).
+    raw_targets_np: np.ndarray = np.array(
+        [float("nan") if v is None else float(v) for v in log_ret],
+        dtype=np.float32,
+    )
+    raw_targets_t = torch.from_numpy(raw_targets_np)
+
     # Vol: target's realized_vol_30; zeros if the column is absent.
     vol_col = f"target__{target_symbol}__realized_vol_30"
     vol_arr: np.ndarray
@@ -516,16 +544,22 @@ def run_tokenizer_pt(
     ts_arr: np.ndarray = features["grid_ts"].dt.epoch("s").to_numpy().astype(np.int64, copy=True)
     timestamps_t = torch.from_numpy(ts_arr)
 
-    # Mask: True iff every feature column is non-null at that row.
-    all_feature_cols = [c for cols in per_channel.values() for c in cols]
-    mask_arr: np.ndarray
-    if all_feature_cols:
-        mask_series = features.select(
-            pl.all_horizontal([pl.col(c).is_not_null() for c in all_feature_cols]).alias("__mask")
-        )["__mask"]
-        mask_arr = mask_series.to_numpy().astype(bool, copy=True)
+    # Sprint 075 mask: target-valid semantic. True iff row t is a full
+    # training example for the target — every target feature non-null AND
+    # `targets[t] != -100`. Non-target null poison (sparse event / macro
+    # channels) does NOT depress the flag; the MarketStateEmbedder consumes
+    # per-channel projections and null features already land as 0.0 tensors.
+    target_key = f"target__{target_symbol}"
+    target_cols = per_channel.get(target_key, [])
+    target_features_valid: np.ndarray
+    if target_cols:
+        target_valid_series = features.select(
+            pl.all_horizontal([pl.col(c).is_not_null() for c in target_cols]).alias("__t_valid")
+        )["__t_valid"]
+        target_features_valid = target_valid_series.to_numpy().astype(bool, copy=True)
     else:
-        mask_arr = np.zeros(n_rows, dtype=bool)
+        target_features_valid = np.ones(n_rows, dtype=bool)
+    mask_arr: np.ndarray = target_features_valid & (targets_np != -100)
     mask_t = torch.from_numpy(mask_arr)
 
     # Meta.
@@ -539,6 +573,17 @@ def run_tokenizer_pt(
         "data_hash": data_hash,
         "target_symbol": target_symbol,
         "channel_coverage_sha": channel_coverage_sha,
+        # Sprint 075: version marker for the `mask` field's semantic.
+        # Pre-Sprint-075 artifacts on disk have no marker; consumers that care
+        # can treat absent-marker as the old all-features-non-null semantic.
+        "mask_semantics": "target_valid_v075",
+        # Sprint 084 (v0.7): True iff a frozen normalizer was applied during
+        # this write. Downstream trainers with fusion='mixer' refuse
+        # artifacts where this is False (see run_training_feats).
+        "normalized": normalizer is not None,
+        # Sprint 088: marker for the raw_targets float field. Pre-Sprint-088
+        # artifacts on disk have no key and load with raw_targets=None.
+        "raw_targets_stamped": "v088",
     }
 
     # Sprint 062: session flags computed from grid_ts. Adds `session__flags`
@@ -555,19 +600,33 @@ def run_tokenizer_pt(
 
         features_dict = apply_frozen_normalizer(features_dict, normalizer)
 
+    # Sprint 078: route through artifacts.write_versioned per Sprint 036
+    # storage discipline. Every write lands at `tokens.{run_id}.pt` with a
+    # `.sha256` sidecar and a `tokens.latest.pt` symlink flip. Regenerations
+    # produce fresh files; hard rule 12 (no deletions) holds mechanically.
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{run_id}.pt"
-    torch.save(
-        {
-            "features": features_dict,
-            "targets": targets_t,
-            "vol": vol_t,
-            "timestamps": timestamps_t,
-            "is_overnight_gap": is_overnight_gap,  # Sprint 062: populated from grid_ts
-            "mask": mask_t,
-            "channel_names": tuple(sorted(features_dict.keys())),
-            "meta": meta,
-        },
-        output_path,
+    payload = {
+        "features": features_dict,
+        "targets": targets_t,
+        "raw_targets": raw_targets_t,  # Sprint 088
+        "vol": vol_t,
+        "timestamps": timestamps_t,
+        "is_overnight_gap": is_overnight_gap,  # Sprint 062: populated from grid_ts
+        "mask": mask_t,
+        "channel_names": tuple(sorted(features_dict.keys())),
+        "meta": meta,
+    }
+    buffer = io.BytesIO()
+    torch.save(payload, buffer)
+    result = write_versioned(output_dir / "tokens.pt", run_id, buffer.getvalue())
+    emitter.emit(
+        "TOKENIZED_ARTIFACT_WRITTEN",
+        run_id=run_id,
+        path=str(result.versioned_path),
+        sha256=result.sha256,
+        n_channels=len(features_dict),
+        n_rows=int(targets_t.shape[0]),
+        mask_semantics=meta["mask_semantics"],
+        normalized=meta["normalized"],
     )
-    return output_path
+    return result.versioned_path

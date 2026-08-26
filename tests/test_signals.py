@@ -54,10 +54,10 @@ VALID_CHECKPOINT_WRITTEN_PAYLOAD = {
 
 
 def test_locked_vocabulary_loads_all_tags():
-    """Sprint 055: default loader is v0.5; assert against the matching version."""
+    """Sprint 084: default loader is v0.7; assert against the matching version."""
     vocab = load_vocabulary()
     raw = json.loads(
-        files("price_space_llm._vocab").joinpath("0.5.json").read_text(encoding="utf-8")
+        files("price_space_llm._vocab").joinpath("0.7.json").read_text(encoding="utf-8")
     )
     assert len(vocab.tags()) == len(raw["tags"])
 

@@ -162,13 +162,27 @@ def _partition_positions_by_regime(
     return positions_by_regime
 
 
+IGNORE_INDEX = -100  # matches PyTorch CE ignore_index; Sprint 052 tokenizer stamp
+
+
 def _metrics_over_positions(
     probs: Tensor,
     targets: Tensor,
     positions: list[int],
     vocab_size: int,
 ) -> MetricSet:
-    """Subset (probs, targets) at the last position of each window and compute the metric set."""
+    """Subset (probs, targets) at the last position of each window and compute the metric set.
+
+    Sprint 082: filters last-position targets equal to `IGNORE_INDEX` (-100)
+    before invoking the metric bundle. Pre-Sprint-082 behavior counted those
+    rows in every metric denominator with a `-100` bucket ID that
+    `probs.gather` / `argmax == target` / `scatter_` interpreted variously —
+    NLL silently picked the last row's probability, top-1/top-3 always missed,
+    Brier's `scatter_(1, -100.unsqueeze(1), 1.0)` either errored or wrote to
+    the wrong row. On the market-state feats path (Sprint 053+) the artifact's
+    `.targets` legitimately carries -100 sentinels; the metric layer must
+    strip them for the score to reflect what the model was scored on.
+    """
     if not positions:
         return MetricSet(
             nll=0.0, ece=0.0, brier=0.0, rps=0.0, dir_acc=0.0, top1=0.0, top3=0.0, n_examples=0
@@ -177,7 +191,12 @@ def _metrics_over_positions(
     idx = torch.tensor(positions, dtype=torch.long)
     last_probs = probs[idx, -1, :]  # (M, V)
     last_targets = targets[idx, -1]  # (M,)
-    return compute_metric_set(last_probs, last_targets, vocab_size)
+    valid = last_targets != IGNORE_INDEX
+    if not bool(valid.any()):
+        return MetricSet(
+            nll=0.0, ece=0.0, brier=0.0, rps=0.0, dir_acc=0.0, top1=0.0, top3=0.0, n_examples=0
+        )
+    return compute_metric_set(last_probs[valid], last_targets[valid], vocab_size)
 
 
 def run_evaluation(
@@ -315,6 +334,15 @@ def _load_market_state_checkpoint(
     """Reconstruct a MarketStateTransformer from a Sprint 053 checkpoint."""
     payload = torch.load(path, map_location="cpu", weights_only=False)
     cfg_dict = payload["config"]
+    # Sprint 115: also thread fusion + mixer settings from the checkpoint config so
+    # mixer-fused checkpoints reconstruct with the right embedder shapes.
+    optional_kwargs: dict[str, Any] = {}
+    if "fusion" in cfg_dict:
+        optional_kwargs["fusion"] = cfg_dict["fusion"]
+    if "mixer_dim" in cfg_dict:
+        optional_kwargs["mixer_dim"] = cfg_dict["mixer_dim"]
+    if "mixer_n_heads" in cfg_dict:
+        optional_kwargs["mixer_n_heads"] = cfg_dict["mixer_n_heads"]
     model_cfg = MarketStateTransformerConfig(
         vocab_size=cfg_dict["vocab_size"],
         context_len=cfg_dict["context_len"],
@@ -323,6 +351,7 @@ def _load_market_state_checkpoint(
         n_heads=cfg_dict["n_heads"],
         channel_dims=dict(cfg_dict["channel_dims"]),
         dropout=0.0,
+        **optional_kwargs,
     )
     model = MarketStateTransformer(model_cfg)
     model.load_state_dict(payload["model_state_dict"])

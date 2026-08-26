@@ -25,25 +25,67 @@ HELDOUT_START_YEAR = 2024
 # `features-{aligned_stem}` naming.
 ALIGNED_FILENAME_PATTERN = re.compile(r"^(?:features-)?align-(\d{4})-(\d{2})")
 
+# Sprint 081: every naming convention the pipeline uses today for dated
+# artifacts. A new pipeline stage that mints a fresh filename shape must
+# register its pattern here; the fail-loud raise below forces the addition
+# to be visible at review time instead of silently bypassing the guard.
+KNOWN_DATED_PATTERNS: tuple[re.Pattern[str], ...] = (
+    ALIGNED_FILENAME_PATTERN,
+    # tokens.<run_id>.pt where run_id embeds `tokenize-features-align-YYYY-MM-...`
+    # per Sprint 078 versioned-write convention.
+    re.compile(r"^tokens\.tokenize-features-align-(\d{4})-(\d{2})"),
+)
+
 
 class HeldoutReadRefused(RuntimeError):
     """Raised when guard_heldout_parquet refuses a read without an acknowledgment."""
 
 
-def parquet_range_starts_in_heldout(path: Path) -> bool:
-    """True iff `path`'s filename starts with `align-YYYY-MM-` and YYYY >= 2024.
-
-    Returns False for filenames that don't match the aligned convention — the
-    guard only fires on files it can positively identify as held-out.
+class UnrecognizedArtifactShape(RuntimeError):
+    """Sprint 081: raised when the filename matches no known dated-artifact
+    pattern. Prevents silent bypass when a new pipeline stage introduces a
+    shape the guard has never seen. Callers that legitimately open non-artifact
+    files pass `allow_unrecognized=True` to opt out.
     """
-    match = ALIGNED_FILENAME_PATTERN.match(path.name)
-    if match is None:
+
+
+def parquet_range_starts_in_heldout(
+    path: Path,
+    *,
+    allow_unrecognized: bool = False,
+) -> bool:
+    """True iff `path`'s filename matches a known dated-artifact pattern and
+    the leading year is >= `HELDOUT_START_YEAR`.
+
+    Sprint 081: raises `UnrecognizedArtifactShape` when `path.name` matches
+    no pattern in `KNOWN_DATED_PATTERNS` and `allow_unrecognized=False`.
+    Pass `allow_unrecognized=True` to fall back to the pre-Sprint-081
+    "unknown shape = not heldout" behavior — legitimate for callers that
+    invoke the guard on scratch or non-artifact files.
+    """
+    for pattern in KNOWN_DATED_PATTERNS:
+        match = pattern.match(path.name)
+        if match is None:
+            continue
+        year = int(match.group(1))
+        return year >= HELDOUT_START_YEAR
+    if allow_unrecognized:
         return False
-    year = int(match.group(1))
-    return year >= HELDOUT_START_YEAR
+    raise UnrecognizedArtifactShape(
+        f"heldout_guard: filename {path.name!r} matches no known dated-artifact "
+        f"pattern (known patterns: {[p.pattern for p in KNOWN_DATED_PATTERNS]}). "
+        "Register a new pattern in KNOWN_DATED_PATTERNS if this is a new "
+        "pipeline artifact class, or pass allow_unrecognized=True if this is a "
+        "scratch / non-artifact file."
+    )
 
 
-def guard_heldout_parquet(path: Path, *, allow_test_look: bool = False) -> None:
+def guard_heldout_parquet(
+    path: Path,
+    *,
+    allow_test_look: bool = False,
+    allow_unrecognized: bool = False,
+) -> None:
     """Raise HeldoutReadRefused if `path` is held-out and `allow_test_look` is False.
 
     Callers that legitimately need held-out access (Sprint 088 first held-out
@@ -51,8 +93,12 @@ def guard_heldout_parquet(path: Path, *, allow_test_look: bool = False) -> None:
     `allow_test_look=True` after registering the look via
     `price_space_llm.testlook.register_test_look`. The guard does not check
     the log itself — that is the caller's contract.
+
+    Sprint 081: `allow_unrecognized=True` passes through to
+    `parquet_range_starts_in_heldout` for callers that legitimately open
+    non-artifact files.
     """
-    if not parquet_range_starts_in_heldout(path):
+    if not parquet_range_starts_in_heldout(path, allow_unrecognized=allow_unrecognized):
         return
     if allow_test_look:
         return
@@ -66,7 +112,9 @@ def guard_heldout_parquet(path: Path, *, allow_test_look: bool = False) -> None:
 
 __all__ = [
     "HELDOUT_START_YEAR",
+    "KNOWN_DATED_PATTERNS",
     "HeldoutReadRefused",
+    "UnrecognizedArtifactShape",
     "guard_heldout_parquet",
     "parquet_range_starts_in_heldout",
 ]

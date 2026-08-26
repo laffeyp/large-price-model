@@ -12,19 +12,27 @@ from price_space_llm.normalizer.drift import (
     two_sample_ks,
 )
 from price_space_llm.normalizer.frozen import (
+    EXPECTED_CONSTANT_CHANNELS,
     FrozenNormalizer,
+    LegacyStdClampMissing,
+    NormalizerStdClampViolation,
     apply_frozen_normalizer,
     fit_frozen_normalizer,
     load_frozen_normalizer,
+    warn_channels_under_clamp,
     write_frozen_normalizer,
 )
 
 __all__ = [
+    "EXPECTED_CONSTANT_CHANNELS",
     "FrozenNormalizer",
+    "LegacyStdClampMissing",
+    "NormalizerStdClampViolation",
     "apply_frozen_normalizer",
     "fit_frozen_normalizer",
     "load_frozen_normalizer",
     "measure_normalizer_drift",
     "two_sample_ks",
+    "warn_channels_under_clamp",
     "write_frozen_normalizer",
 ]

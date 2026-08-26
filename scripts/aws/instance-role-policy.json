@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3PayloadAndLogsFromInstance",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::price-space-llm-v1-payload",
+        "arn:aws:s3:::price-space-llm-v1-payload/*",
+        "arn:aws:s3:::price-space-llm-v1-logs",
+        "arn:aws:s3:::price-space-llm-v1-logs/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchLogsFromInstance",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:us-east-1:648879824221:log-group:/aws/ec2/price-space-llm-v1/*"
+    }
+  ]
+}
