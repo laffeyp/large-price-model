@@ -2,9 +2,9 @@
 
 *Python package: `price_space_llm` — the historical name. Kept for import stability.*
 
-A causal decoder transformer, of the same shape used for language, trained on fifteen-minute SPY bars. The point was not to trade. The point was to see what a language-model architecture does when the tokens are prices instead of words.
+A causal decoder transformer trained on fifteen-minute SPY bars. The tokens are quantile bins of the next-bar return. The point was research, not trading: what happens in this specific narrow shape — decoder-only, thirty-two vol-normalized return bins as the vocabulary, twenty channels of state as input — and what does the log-loss gain over a linear baseline actually contain.
 
-Language models won at text. They then won at code, images, and audio. Each time, the same architecture — attention over past tokens — turned out to carry structure the older tools missed. Prices are the next reasonable place to look. This repository is what happened when that architecture was pointed at eight years of fifteen-minute SPY bars.
+Transformers on price series are not new. Informer, TimesNet, PatchTST, and years of applied work came first. This repository is not a claim on the architecture family. It is a specific configuration, run end to end with a full downstream reader (a simulator) used as a diagnostic.
 
 ## What it does
 
