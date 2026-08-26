@@ -10,9 +10,7 @@ At each bar the simulator reads the model's distribution, decides whether to ope
 
 The model beats the linear baseline on log-loss. Across five seeds the best configuration reaches 3.180 against a linear at 3.333. Every seed beats linear. The pre-registered target was ten percent below linear; the result is three percent below. The direction is real. The size is small.
 
-The gain does not appear in the mean. The best model's mean prediction is near zero — about one part in a million. The probability the return is positive comes out to 0.4973: a coin flip. A rule that trades on the sign of the mean captures none of the log-loss gain. The transformer has learned more about which bin is likely. It has learned no more about which side of zero.
-
-A distribution can grow sharper without shifting. Three percent of log-loss can hide inside its variance and its tails, invisible to any decoder that reads only the mean.
+The gain does not appear in the mean. Log-loss falls from 3.333 to 3.180 while the mean prediction stays within a millionth of zero. The probability of a positive return comes out to 0.4973: a coin flip. A rule that trades on the sign of the mean captures none of the log-loss gain. The transformer has narrowed its bet on which bin the return will land in. It has not moved its bet on the direction.
 
 Full breakdown in [`reviews/phase-h-close.md`](reviews/phase-h-close.md).
 
