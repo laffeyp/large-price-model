@@ -1,28 +1,18 @@
 # large-price-model
 
-*Python package: `price_space_llm` — the historical name. Kept for import stability.*
+A transformer predicts the next fifteen-minute SPY return. A simulator walks the bars, trades on those predictions, and keeps a ledger. This repository holds both, and the record of what they produced.
 
-A causal decoder transformer trained on fifteen-minute SPY bars. The tokens are quantile bins of the next-bar return. The point was research, not trading: what happens in this specific narrow shape — decoder-only, thirty-two vol-normalized return bins as the vocabulary, twenty channels of state as input — and what does the log-loss gain over a linear baseline actually contain.
+The model reads eight years of fifteen-minute bars across twenty channels: SPY on one, and on the other nineteen other stocks, currencies, macro releases, options figures, and calendar events. It outputs a probability across thirty-two bins of the next return. A normalizer fit on the training window holds the scale. A linear regression on past bins is the baseline.
 
-Transformers on price series are not new. Informer, TimesNet, PatchTST, and years of applied work came first. This repository is not a claim on the architecture family. It is a specific configuration, run end to end with a full downstream reader (a simulator) used as a diagnostic.
-
-## What it does
-
-The model reads twenty channels of state on a fifteen-minute grid: SPY features, other assets, macro releases, options metrics, event flags. It writes a probability distribution over thirty-two bins of the next bar's return. A frozen normalizer holds the training-window scale. A linear regression on past returns is the baseline.
-
-Alongside the model sits a simulator: a bar walker, a position machine, a trade ledger, a Sharpe number with a standard error and a block-bootstrap distribution. The simulator was built to test the model, not to trade. It answers one question: does the log-loss improvement over linear survive being read as a directional signal?
+The simulator walks the bars, opens and closes positions on the model's predictions, keeps a trade ledger, and reports Sharpe with a bootstrapped error bar.
 
 ## What it found
 
-Two things.
+The model beats the linear baseline on log-loss. Across five seeds the best configuration reaches 3.180 against a linear at 3.333. Every seed beats linear. The pre-registered target was ten percent below linear; the result is three percent below. The direction is real. The size is small.
 
-The model learns something. Across five seeds, the best configuration reaches validation log-loss 3.180 against a linear baseline at 3.333 — an improvement of 3.29 percent. Every seed beats linear. The pre-registered target was ten percent; the margin fell short by roughly a factor of three. The direction is real, the magnitude is small, and it reproduces.
+The gain does not appear in the mean. The best model's mean prediction is near zero — expected return around one millionth of a log-return unit, p_up 0.4973. A rule that trades on the sign of the mean captures none of the log-loss gain. The transformer has learned more about which bin is likely. It has learned no more about which side of zero.
 
-The improvement lives in the shape of the distribution, not the mean. The best model's mean prediction is essentially zero. Its p_up sits at 0.4973, a coin flip. A simulator that decodes the distribution into "which side of zero" captures none of the log-loss gain. The transformer knows more than the linear baseline about which bin is likely; it has learned nothing more about which half of the number line the next return will land on.
-
-This is the interesting finding. In text, "what comes next" has one mean and one shape at once; the next word is the sentence. In prices they separate. A conditional distribution can grow sharper without shifting. Three percent of log-loss can hide entirely inside variance and tail shape, invisible to any reader that only looks at the mean.
-
-That opens the successor's questions. Which parts of the distribution the model actually improved. Whether those parts carry a signal a non-scalar reader could use. What the encoder is putting into its representation space that shows up as shape and not location.
+That gap between shape and side is the finding. A distribution can grow sharper without shifting. Three percent of log-loss can hide inside variance and tail shape, invisible to any decoder that reads only the mean.
 
 Full breakdown in [`reviews/phase-h-close.md`](reviews/phase-h-close.md).
 
@@ -58,19 +48,23 @@ uv run python scripts/train.py \
   --device mps
 ```
 
-`--device` accepts `cpu`, `mps`, or `cuda`. The full arc ran on an Apple M5 Max via MPS. AWS scaffolding lives in `scripts/aws/` as a scale-up option. Raw data, features, checkpoints, and traces are gitignored; rebuild them from `scripts/ingest.py` onward.
+`--device` accepts `cpu`, `mps`, or `cuda`. The arc ran on an Apple M5 Max via MPS. AWS scaffolding under `scripts/aws/` is a scale-up option. Raw data, features, checkpoints, and traces are gitignored; rebuild from `scripts/ingest.py` onward.
 
 ## Methodology
 
-The project runs under Signal-Driven Development. Every unit of work is a sprint card in `sprints/`. Every code path emits typed signals against a locked vocabulary at `signals/0.7.json`; a strict emitter validates each call at the source. Every sprint closes with a walk over its emitted trace. Cross-sprint lessons land in `KIT_DIARY.md`. See [`sdd-kit-2/README.md`](sdd-kit-2/README.md).
+The project runs under Signal-Driven Development. Every unit of work is a sprint card in `sprints/`. Every code path emits typed signals against the locked vocabulary at `signals/0.7.json`. A strict emitter validates each call at the source. Every sprint closes with a walk over its trace. Cross-sprint lessons land in `KIT_DIARY.md`. See [`sdd-kit-2/README.md`](sdd-kit-2/README.md).
 
 For a first read: `BLACKBOARD.md` is the current-state summary. `reviews/phase-h-close.md` is the final result. `sprints/` is the audit trail.
 
-## Successor
+## Next
 
-Working name: Large Price Model. Two workstreams. First, a database at the highest resolution available — the structure of the data is part of the model, not a downstream constraint. Second, two research tracks: what the encoder builds in the representation space, and which cross-domain metaphors from language and vision carry into price data.
+Two workstreams named at the close of this phase.
 
-Written up separately when it exists.
+A database at the highest resolution available. The structure of the data is part of the model, not a downstream constraint.
+
+Two research tracks: what the encoder builds in its representation, and which ideas from language and vision transfer to price data.
+
+Written up separately.
 
 ## License
 
