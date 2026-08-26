@@ -89,36 +89,17 @@ question for a follow-on project.
 
 ## What the phase proved
 
-A causal decoder transformer over vol-normalized categorical price
-targets, with multi-channel state-vector input, trains end-to-end on
-SPY 15-minute bars. It produces a distribution that improves on a
-linear baseline in log-loss terms by a small margin (~3%). That is
-the theoretical prediction: a language-model architecture applied
-to price sequences yields a modest but real improvement in
-distributional prediction over a linear regression on past returns.
+A causal decoder transformer trains end-to-end on SPY 15-minute bars. Across five seeds it beats a linear baseline on validation log-loss by 3.29% on average. The improvement lives in the shape of the output distribution, not the mean. A directional trading policy captures none of it, on either the training-window validation split or the held-out window.
 
-The phase does not prove — and never claimed to prove — that this
-translates into a profitable trading strategy. The held-out result is
-consistent with the training-window result: the model has a shape
-edge, not a mean edge, and a directional policy captures none of it.
+## Next
 
-## Next project
+Two directions.
 
-Two workstreams named for the successor project:
+1. Build the database. Highest-resolution data available across whatever instrument set the theory calls for. The shape of the data is part of the design.
 
-1. Build the database. Highest-resolution data available across whatever
-   instrument set the theory calls for. Data structure is part of the
-   design, not a downstream constraint. Written as its own product +
-   research document.
+2. Two research tracks: what the encoder builds in its representation, and which ideas from language and vision transfer to price data.
 
-2. Two research tracks: what the encoder builds in the high-dimensional
-   representation space, and which cross-domain metaphors from language
-   and vision carry into price data.
-
-The successor project's working name is Large Price Model. This project
-was the toy that confirmed the architecture executes end-to-end and
-produces the theoretically-expected small edge in log-loss. That result
-stands.
+Written up separately.
 
 ## Repository state
 
