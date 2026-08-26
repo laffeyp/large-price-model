@@ -1,4 +1,6 @@
-# PriceSpaceLLM
+# large-price-model
+
+*Python package: `price_space_llm` — the historical name. Kept for import stability.*
 
 Research on whether a language-model architecture — a causal decoder transformer with attention over past tokens — learns anything useful when applied to price sequences. This repository is the record of the experiment.
 
