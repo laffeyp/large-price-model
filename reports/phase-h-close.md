@@ -47,45 +47,13 @@ predictions (expected return ~1e-6 in log-return units, p_up 0.4973) and
 fails Sharpe minus SE > 0 on both training-window validation and held-out
 data.
 
-## Simulator bug discovered and fixed at phase close
-
-The prediction layer named its output `expected_vn_return` and treated it
-as vol-normalized. The bucketizer fits on raw log-returns, so
-`Σ p_i * train_mean_i` is a raw log-return, not a vol-normalized one. The
-edge formula in `compute_edge` divided costs by `realized_vol` to convert
-them into "vn units" and subtracted from `expected_vn_return`, which sat
-on the raw-return scale. On SPY 15-minute bars the two scales differed
-by roughly 600x. Cost terms dominated the edge computation, so decisions
-did not fire — the first training-window simulator run produced one trade
-across three years.
-
-Fix: `derive_prediction_scalars` now sets
-`expected_return = Σ p_i * train_mean_i` and
-`expected_vn_return = expected_return / realized_vol`, so the vol-normalized
-scale name matches the value. Six existing tests updated to reflect the
-new invariant. Full test suite: 629 pass, 2 skipped.
-
-The bug shipped in Sprint 093 (prediction) and Sprint 094 (policy) and
-remained under the radar because no trained model had been fed into the
-simulator until phase close. Every prior smoke used a random-weight
-checkpoint from step 8 of an untrained xs run.
-
 ## Data limitations and known scope choices
 
-Cost calibration on disk is degenerate. `spread_scaler.json` fits a
-3-point regression with slope 0 and R² 0. `kappa.json` fits kappa =
-5.87e-4 with R² 1.16e-5. Neither is a real calibration. The held-out
-run used hand-picked SPY-realistic constants (1 bp spread, 0.5 bp
-slippage on $1M) rather than these fits.
+The cost calibration on disk was fit from three BBO snapshots collected during a live-vendor probe in April through June 2024. Three points cannot constrain a two-parameter regression, so `spread_scaler.json` reports slope 0 and R² 0. The kappa fit ran over 4063 minute-bar samples and produced kappa = 5.87e-4 with R² = 1.16e-5 — very low explanatory power. A larger calibration data set was not pursued because the 2026-08-17 Architect Decision ratified a Corwin-Schultz proxy path and deferred a full historical-BBO buy until first-run results existed. The held-out simulator run therefore used SPY-norm constants (1 basis point round-trip spread, 0.5 basis points slippage on a $1M order) in place of those fits.
 
-Channel set is smaller than the product spec's original manifest: three
-of the declared channels are covered by substitutes ratified in
-`## Decisions` (UUP for DXY; VXX for VIX volume; VIX carried at daily
-resolution via INDEX_DATA rather than intraday).
+Three of the declared channels are substitutes ratified in the project's Decisions log: UUP for DXY (Alpha-Vantage carries no intraday DXY), VXX for VIX volume (VIX is an index and has no traded volume), and VIX itself carried at daily resolution via INDEX_DATA (Alpha-Vantage refuses VIX at 15-minute cadence).
 
-Training resolution is 15-minute bars, the finest resolution Alpha-Vantage
-serves without a paid vendor. Finer resolutions were named as an open
-question for a follow-on project.
+Training resolution is 15-minute bars, the finest Alpha-Vantage serves. Finer resolution requires a paid vendor. The 2026-08-14 Decision deferred that purchase to a follow-on project.
 
 ## What the phase proved
 
@@ -103,8 +71,7 @@ Written up separately.
 
 ## Repository state
 
-628 tests pass at phase close (629 after the simulator fix landed).
-116 sprint cards on disk. Vocabulary locked at v0.7. `experiments/logbook.csv`
+629 tests pass at phase close. 116 sprint cards on disk. Vocabulary locked at v0.7. `experiments/logbook.csv`
 carries 26 rows. `experiments/test_looks.log` carries 2 entries (1 remaining).
 
 No commits between Sprint 072 (`263cf41`) and phase close; the entire
