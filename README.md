@@ -6,9 +6,9 @@ A transformer predicts the next fifteen-minute return of the SPDR S&P 500 ETF (S
 
 The model reads eight years of fifteen-minute bars — 2015 through 2022 — across twenty parallel time series. One is SPY itself. The rest carry other stocks, currencies, macro releases, options data, and calendar events. For each bar the model outputs a probability distribution over thirty-two buckets of the next return. The buckets are quantiles of the training-set return distribution, so each holds roughly the same number of training examples. This turns return prediction into bucket classification — the kind of task a language-model architecture (attention over past tokens) is built for.
 
-Two safeguards keep the held-out data honest. A normalizer scales each channel using statistics computed only over 2015-2022, so the model never sees held-out data. A held-out window covering 2024-01 through 2025-06 was set aside before training and may be read at most three times over the project's lifetime, enforced by a filesystem guard and a commit-message hook.
+A normalizer scales each channel using statistics computed only over 2015-2022, so the model never sees held-out numbers at training time. A held-out window covering 2024-01 through 2025-06 was set aside before training and may be read at most three times over the project's lifetime, enforced by a filesystem guard and a commit-message hook.
 
-The baseline is a linear regression on the sequence of past bucket labels — no attention, no channels other than the target's own history. It captures whatever structure lives in the returns themselves.
+The baseline is a linear regression on the sequence of past bucket labels — no attention, no channels other than the target's own history. It captures the autoregressive structure in the returns and nothing else.
 
 At each bar the simulator reads the model's distribution, decides whether to open, hold, or close a position, and records the trade. At the end it reports Sharpe — average return divided by return volatility, annualized — with an error bar from block-bootstrap resampling.
 
@@ -60,7 +60,7 @@ uv run python scripts/train.py \
 
 ## Methodology
 
-The project runs under Signal-Driven Development. Every code path emits a typed event against a locked vocabulary. Every task begins as a sprint card that declares what it will do and what events it will produce. Each task lives in `sprints/`. The vocabulary lives at `signals/0.7.json`. A strict emitter checks each call as it is made. Each sprint closes with a review of the signals it emitted. Lessons that span sprints go into `KIT_DIARY.md`. See [`sdd-kit-2/README.md`](sdd-kit-2/README.md).
+The project runs under Signal-Driven Development. Every code path emits a typed event against the locked vocabulary at `signals/0.7.json`, and a strict emitter checks each call as it is made. Tasks begin as sprint cards in `sprints/`; each card declares what it will do and what events it will produce. A sprint closes by reading its emitted signals back and reviewing them. Lessons that span sprints go into `KIT_DIARY.md`. See [`sdd-kit-2/README.md`](sdd-kit-2/README.md).
 
 `BLACKBOARD.md` holds the current-state summary. `reports/phase-h-close.md` holds the final result. `sprints/` holds the audit trail.
 
