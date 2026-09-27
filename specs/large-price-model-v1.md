@@ -28,7 +28,7 @@ First pass: a written comparison matrix of (resolution × instrument-set × vend
 
 **On sequencing.** A competent alternative frame says: before changing what data the project consumes, diagnose the existing model on the existing data. Retarget it, probe its internals, run synthetic controls (see Question 2), and let the diagnosis point at what data actually needs to change. That frame is defensible. It runs cheap, it produces publication-value findings from the existing corpus, and it avoids committing to a large data acquisition before the questions the data would answer are sharpened.
 
-This spec takes the opposite position: the data comes first. The reason is structural. The shape of the data determines what the model can learn to represent. A diagnostic pass on a corpus that averages away the microstructure will confirm that the microstructure was averaged away, and will not open the questions only richer data can answer. Both workstreams still run — Question 2's diagnostics on whatever data is on hand, Question 1's acquisition on its own schedule — on the theory that findings from each refine what the other asks for.
+This spec takes the opposite position: the data comes first. The reason is structural. The shape of the data determines what the model can learn to represent. A diagnostic pass on a corpus that averages away the microstructure will confirm that the microstructure was averaged away, and will not open the questions only richer data can answer. The 15-minute Alpha-Vantage corpus was the toy version. The next phase acquires all of the data first (Architect, 2026-09-27); Questions 2 and 3 run on the acquired corpus, not on the toy one.
 
 ## Question 2 — what does the inside of the model need to look like, and how do we get it there?
 
@@ -87,7 +87,7 @@ The output of Question 3 is a growing set of tested metaphors, each marked as tr
 
 - No hosted trackers. Local files and self-hosted tools only. Ratified 2026-08-13.
 - Signal-Driven Development discipline. Every task is a sprint card. Every code path emits typed signals. Every sprint closes with a review.
-- Held-out data is sacred. The initial phase's held-out window (2024-01 through 2025-06) has one look remaining. The successor declares its own held-out window and its own look budget in a Decision before any track-2 or track-3 result is measured against it.
+- Held-out data is sacred. The successor's held-out window is 2025-07-01 through 2026-06-30, three looks, fixed 2026-09-27 before any successor data is pulled. It is the most recent year and has never been read by any model. The initial phase's window (2024-01 through 2025-06) was read twice; it is spent as a test set and joins training and validation. Every instrument and resolution the successor acquires honors the same boundary, and the successor pipeline's held-out guard encodes it before its first read.
 
 ## Companion specs
 

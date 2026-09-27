@@ -261,6 +261,10 @@ The pipeline has no user-facing prose beyond CLI stderr. Rules:
 
 ---
 
+## Decision routing (2026-09-27)
+
+Override on the kit's surface-and-wait pattern. Open questions that need the Architect go to the Architect in the chat reply, not to `BLACKBOARD.md ## Surfaced for review` or any other document to be found later. Questions that software-engineering or SDD best practice already answers are not questions: the Agent decides, acts, and records the decision and its reason in the sprint's BLACKBOARD entry.
+
 ## Sprint cadence policy
 
 - **Phase 0 (Vocabulary Session):** plan-mode — Architect drives interactively per `sdd-kit-2/grammar/BOOTSTRAP.md`.
