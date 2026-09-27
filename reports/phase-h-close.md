@@ -2,6 +2,8 @@
 
 Date: 2026-08-26
 
+> Corrected 2026-09-27: the 3.29% log-loss margin below is against an untuned linear baseline. Against tuned baselines the margin is 1.0-2.3%. See "Correction" at the end and `reports/baseline-convergence.md`. The held-out trading result is unchanged.
+
 ## Held-out result
 
 Sprint 115 mixer (mixer fusion, lr=3e-5, seed 0, val_nll 3.148 on training split)
@@ -77,3 +79,9 @@ carries 26 rows. `experiments/test_looks.log` carries 2 entries (1 remaining).
 No commits between Sprint 072 (`263cf41`) and phase close; the entire
 Phase E through Phase H arc lives in the working tree and lands in a
 single commit at phase close.
+
+## Correction — 2026-09-27 (Sprint 118)
+
+The margins above are measured against linear at 3.289, its best step at lr 1e-3. Tuned and early-stopped over five seeds, the target-history baselines reach linear 3.256, GRU 3.219 and MLP 3.212. The transformer's 3.180 beats them by 2.31%, 1.20% and 0.99%, and every transformer seed beats every baseline seed. These baselines read target history only; the product spec's pre-registered baselines (linear and MLP on the multi-channel input, a ~1M-parameter GRU/TCN, a target-only ablation) were never built, so the pre-registered log-loss gates above were never measured. The linear baseline was not undertrained: at lr 1e-3 it peaks at step 800 and overfits after. Evidence in `reports/baseline-convergence.md`. The held-out simulator result above is unchanged.
+
+The repository-state line "116 sprint cards on disk" counted 114; cards 040 and 079 were never written, and Sprint 117 has no card.

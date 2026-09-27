@@ -13,7 +13,10 @@ from price_space_llm.simulation import derive_prediction_scalars
 
 
 def test_derive_prediction_scalars_uniform_distribution():
-    """Uniform probs over V=4 symmetric means → EV=0, EV_vn=0, p_up=0.5, entropy=log(4), sharpness=0."""
+    """Uniform probs over V=4 symmetric means.
+
+    Expect EV=0, EV_vn=0, p_up=0.5, entropy=log(4), sharpness=0.
+    """
     probs = torch.full((4,), 0.25)
     means = torch.tensor([-1.0, -0.5, 0.5, 1.0])
     s = derive_prediction_scalars(probs, means, realized_vol=0.01)

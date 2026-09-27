@@ -8,17 +8,30 @@ The model reads eight years of fifteen-minute bars — 2015 through 2022 — acr
 
 A normalizer scales each channel using statistics computed only over 2015-2022, so the model never sees held-out numbers at training time. A held-out window covering 2024-01 through 2025-06 was set aside before training and may be read at most three times over the project's lifetime, enforced by a filesystem guard and a commit-message hook.
 
-The baseline is a linear regression on the sequence of past bucket labels — no attention, no channels other than the target's own history. It captures the autoregressive structure in the returns and nothing else.
+Three baselines read only the target's own history: the last 64 bucket labels, no attention, no other channels. They are a linear softmax over the one-hot labels, a three-layer MLP, and a one-layer GRU. Each is tuned over learning rate and weight decay and stopped at its best validation step, the same selection rule the transformer runs used.
 
 At each bar the simulator reads the model's distribution, decides whether to open, hold, or close a position, and records the trade. At the end it reports Sharpe — average return divided by return volatility, annualized — with an error bar from block-bootstrap resampling.
 
 ## What it found
 
-The model beats the baseline on log-loss, the standard measure of how much probability a model puts on the correct next bucket. Across five seeds the best configuration reaches 3.180 against a linear baseline at 3.333. Every seed beats linear. The pre-registered target was ten percent below linear; the result is three percent below. The direction is real. The size is small.
+The model beats every baseline on log-loss, the standard measure of how much probability a model puts on the correct next bucket. Lower is better; a uniform guess over 32 buckets scores 3.466.
 
-The gain does not appear in the mean. Log-loss falls from 3.333 to 3.180 while the mean prediction stays within a millionth of zero. The probability of a positive return comes out to 0.4973: a coin flip. A rule that trades on the sign of the mean captures none of the log-loss gain. The transformer has narrowed its bet on which bucket the return will land in. It has not moved its bet on the direction.
+| model (5 seeds each) | validation log-loss | transformer ahead by |
+|---|---:|---:|
+| linear | 3.256 | 2.3% |
+| GRU | 3.219 | 1.2% |
+| MLP | 3.212 | 1.0% |
+| transformer | 3.180 | — |
+
+Every transformer seed beats every baseline seed. The direction is real. The size is small. These baselines are not the ones the product spec pre-registered: the spec's linear and MLP read the same multi-channel input as the transformer, and its GRU/TCN has about a million parameters. Those were never built, and neither was the spec's target-only ablation (the same transformer with the other nineteen channels zeroed), so the pre-registered log-loss gates were never measured, and whether the extra channels help is not settled here.
+
+The baselines were not undertrained. The `n_steps=200` default in `baselines.py` is a smoke-test setting. At the project's learning rate the linear baseline peaks at step 800 (3.289) and overfits after: 3.502 at 5,000 steps, 3.668 at 8,000. The numbers above are early-stopped at a tuned learning rate. The first write-up (August 2026) reported a 3.3 percent margin against linear's 3.289; tuning linear and adding the MLP and GRU shrink it to the table above. Evidence and a ten-minute rerun: [`reports/baseline-convergence.md`](reports/baseline-convergence.md).
+
+The gain does not appear in the mean. Log-loss falls to 3.180 while the mean prediction stays within a millionth of zero. The probability of a positive return comes out to 0.4973: a coin flip. A rule that trades on the sign of the mean captures none of the log-loss gain. The transformer has narrowed its bet on which bucket the return will land in. It has not moved its bet on the direction.
 
 Log-loss rewards a good probability on the right bucket. A model can improve it by moving probability mass around inside the distribution without moving the distribution's center. Bucket and direction are separate facts about a return; a directional strategy reads only the second.
+
+On the untouched 2024-01 through 2025-06 window, a simulator that trades on the model's forecast loses money at every threshold tried: Sharpe −1.82 to −2.17, with fewer than two in a thousand bootstrap resamples positive.
 
 Full breakdown in [`reports/phase-h-close.md`](reports/phase-h-close.md).
 
@@ -27,8 +40,8 @@ Full breakdown in [`reports/phase-h-close.md`](reports/phase-h-close.md).
 ```
 src/price_space_llm/     the library
 scripts/                 CLIs — ingest, align, features, bucketize, train, evaluate, simulate
-tests/                   629 tests, `uv run pytest`
-sprints/                 117 sprint cards, one per unit of work
+tests/                   `uv run pytest`; tests that need the gitignored data skip without it
+sprints/                 sprint cards 001-119 (040, 079 and 117 have no card; see BLACKBOARD)
 signals/                 the locked signal vocabulary (v0.7)
 reports/                 phase-close reports
 postmortems/             bug post-mortems
@@ -45,10 +58,10 @@ plans/                   the roadmap
 
 ```bash
 uv sync --dev
-uv run pytest                # 629 pass, 2 skipped
+uv run pytest
 
 uv run python scripts/train.py \
-  --tokens-pt data/tokenized/tokens.latest.pt \
+  --tokens-pt data/tokenized/normalized/tokens.tokenize-features-align-2015-01-2022-12-0000000000000000-0000000000000000-0000000000000000.pt \
   --model-size md \
   --fusion mixer \
   --lr 3e-5 \

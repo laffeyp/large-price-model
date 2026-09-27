@@ -75,9 +75,13 @@ def test_train_cli_rejects_both_model_size_and_model_config(tmp_path: Path):
     """Passing --model-size and --model-config together exits 1."""
     import subprocess
 
-    # Sprint 078: prefer the tokens.latest.pt symlink; fall back to the
-    # pre-Sprint-078 bare-path file.
-    versioned = REPO_ROOT / "data" / "tokenized" / "tokens.latest.pt"
+    # Sprint 119: name the normalized 2015-2022 training artifact. The old
+    # data/tokenized/tokens.latest.pt symlink pointed at held-out tokens after
+    # Sprint 117, and these smokes trained on it; train.py now refuses that.
+    versioned = REPO_ROOT / "data" / "tokenized" / "normalized" / (
+        "tokens.tokenize-features-align-2015-01-2022-12-"
+        "0000000000000000-0000000000000000-0000000000000000.pt"
+    )
     bare_legacy = REPO_ROOT / "data" / "tokenized" / (
         "tokenize-features-align-2015-01-2022-12-"
         "0000000000000000-0000000000000000-0000000000000000.pt"
@@ -114,9 +118,13 @@ def test_train_cli_xs_smoke_on_pt_artifact(tmp_path: Path):
     """
     import subprocess
 
-    # Sprint 078: prefer the tokens.latest.pt symlink; fall back to the
-    # pre-Sprint-078 bare-path file.
-    versioned = REPO_ROOT / "data" / "tokenized" / "tokens.latest.pt"
+    # Sprint 119: name the normalized 2015-2022 training artifact. The old
+    # data/tokenized/tokens.latest.pt symlink pointed at held-out tokens after
+    # Sprint 117, and these smokes trained on it; train.py now refuses that.
+    versioned = REPO_ROOT / "data" / "tokenized" / "normalized" / (
+        "tokens.tokenize-features-align-2015-01-2022-12-"
+        "0000000000000000-0000000000000000-0000000000000000.pt"
+    )
     bare_legacy = REPO_ROOT / "data" / "tokenized" / (
         "tokenize-features-align-2015-01-2022-12-"
         "0000000000000000-0000000000000000-0000000000000000.pt"
@@ -171,9 +179,13 @@ def test_train_cli_rejects_both_context_size_and_context_config(tmp_path: Path):
     """Passing --context-size and --context-config together exits 1."""
     import subprocess
 
-    # Sprint 078: prefer the tokens.latest.pt symlink; fall back to the
-    # pre-Sprint-078 bare-path file.
-    versioned = REPO_ROOT / "data" / "tokenized" / "tokens.latest.pt"
+    # Sprint 119: name the normalized 2015-2022 training artifact. The old
+    # data/tokenized/tokens.latest.pt symlink pointed at held-out tokens after
+    # Sprint 117, and these smokes trained on it; train.py now refuses that.
+    versioned = REPO_ROOT / "data" / "tokenized" / "normalized" / (
+        "tokens.tokenize-features-align-2015-01-2022-12-"
+        "0000000000000000-0000000000000000-0000000000000000.pt"
+    )
     bare_legacy = REPO_ROOT / "data" / "tokenized" / (
         "tokenize-features-align-2015-01-2022-12-"
         "0000000000000000-0000000000000000-0000000000000000.pt"
@@ -212,9 +224,13 @@ def test_train_cli_c128_xs_smoke_on_pt_artifact(tmp_path: Path):
     """
     import subprocess
 
-    # Sprint 078: prefer the tokens.latest.pt symlink; fall back to the
-    # pre-Sprint-078 bare-path file.
-    versioned = REPO_ROOT / "data" / "tokenized" / "tokens.latest.pt"
+    # Sprint 119: name the normalized 2015-2022 training artifact. The old
+    # data/tokenized/tokens.latest.pt symlink pointed at held-out tokens after
+    # Sprint 117, and these smokes trained on it; train.py now refuses that.
+    versioned = REPO_ROOT / "data" / "tokenized" / "normalized" / (
+        "tokens.tokenize-features-align-2015-01-2022-12-"
+        "0000000000000000-0000000000000000-0000000000000000.pt"
+    )
     bare_legacy = REPO_ROOT / "data" / "tokenized" / (
         "tokenize-features-align-2015-01-2022-12-"
         "0000000000000000-0000000000000000-0000000000000000.pt"

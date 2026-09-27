@@ -39,6 +39,32 @@ Phase boundaries get a synthesis section. At project close, a final synthesis li
 
 ## Entries
 
+### 2026-09-27 — Sprints 118-119: outside audit, baseline correction, held-out guard
+
+**What happened.** An LLM auditing the public GitHub repo, with no local data, read `fit_linear(n_steps=200)` and the logbook row and concluded the linear baseline was undertrained. The Architect asked why a reader of the repo got it wrong. Sprint 118 ran the question on the real data: linear at lr 1e-3 peaks at step 800 and overfits after, so the audit was wrong; but tuned and early-stopped over five seeds, linear (3.256), GRU (3.219) and MLP (3.212) all beat the 3.289 that Phase H's 3.29% margin was measured against. The transformer's real edge over the best target-history baseline is 0.99%. Sprint 119 closed a guard hole the same audit found: `tokens.latest.pt` pointed at held-out tokens, the README trained on it, and `train.py` never called the guard. The fixed guard's first full-suite run caught two train smokes that had been reading held-out tokens through that symlink since 2026-08-25.
+
+**What worked.**
+
+- **Running the claim instead of arguing it.** The audit's claim and its refutation both took under a minute each to state and ten minutes to test. The test also found what neither side had said: the MLP, never compared in Phase H, is the strongest baseline.
+- **Verify-the-verifier paid twice.** The D3 sabotage check proved the new guard tests go red on old code; then the guard itself went red on two existing tests that had been leaking for a month.
+
+**What got in the way.**
+
+- **The evidence existed and was invisible.** Sprint 111's tail entry recorded "5000 steps -> 3.587 vs 200 steps -> 3.333. overfitting" and the ledger was corrected to 3.2886 in Sprint 113. Both lived on line 559 of a 30k-token BLACKBOARD and in a gitignored `artifacts/` report. The README quoted 3.333. A reader of the public face saw the code default and the wrong number, and nothing else.
+- **A symlink defeated a name-based guard.** `heldout_guard` matched filenames; `tokens.latest.pt` matched no pattern and resolved to a held-out file. A convenience pointer silently reclassified held-out data as unrecognized.
+
+**What this says about the next kit version.**
+
+- **4. The public face must answer the obvious skeptical question.** For any headline comparison, the README (or the report it links) names the question a skeptic will ask first ("was the baseline trained?", "was the test set touched?") and answers it with a number and a rerun command. Internal logs do not count as public evidence; `artifacts/` is gitignored.
+- **5. Code defaults are read as the reported configuration.** A default that is a smoke-test setting says so in its docstring, or an outside reader will take it as the experiment.
+- **6. Guards resolve pointers.** Any guard that classifies files by name resolves symlinks first and checks both names.
+
+**Hypothesis verdicts.**
+
+- H9 (first-live-contact surfaces what mocks cannot). Confirmed again from a new angle: first contact with an outside reader surfaced a misreading the project's own reviews never produced, and first contact of the new guard with the real suite surfaced a month-old leak.
+
+---
+
 ### 2026-08-26 — Sprint 117: phase close, held-out result, successor spec
 
 **What happened.** Ran the held-out simulator against the Sprint 115 mixer on the untouched 2024-01 through 2025-06 window. Sharpe minus SE fails at every threshold; the log-loss edge does not translate to a directional trading edge. Found and fixed a scale bug in the simulator (`derive_prediction_scalars` produced a raw log-return under a name that promised a vol-normalized one; the two scales differ by ~600x on SPY 15-min bars). Wrote the phase report (`reports/phase-h-close.md`) and the bug post-mortem (`postmortems/simulator-scale.md`). Reorganized docs: `postmortems/` and `reports/` split out of `reviews/`. Added README, LICENSE (Apache 2.0), SECURITY, CHANGELOG. Renamed the repository to `large-price-model` on GitHub. Drafted the successor spec at `specs/large-price-model-v1.md` — three co-equal open research questions: how to get the data we need, what the encoder builds internally, and which ideas from language and vision transfer to price data.

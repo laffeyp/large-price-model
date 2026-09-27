@@ -2,7 +2,7 @@
 
 Spec for the next phase of the project. The initial phase — a causal decoder transformer over 15-minute SPY bars — closed on 2026-08-26 (`reports/phase-h-close.md`). It established two facts about the model's output.
 
-First, the technique runs end-to-end and produces the small improvement over a linear baseline that a proof-of-concept build should produce (log-loss 3.180 against 3.333 across five seeds).
+First, the technique runs end-to-end and produces a small improvement over baselines that read only the target's own history: log-loss 3.180 against a tuned MLP at 3.212, GRU at 3.219 and linear at 3.256, five seeds each (`reports/baseline-convergence.md`, corrected 2026-09-27 from the earlier "3.180 against 3.333"). Those baselines read only SPY's bucket history; the spec-defined target-only ablation, which would say what the other nineteen channels add, was never run on the normalized data.
 
 Second, the improvement decomposes precisely. Every next return can be split into two parts: a conditional mean — the drift the input features predict — and a conditional variance — the spread around that drift, also conditioned on the input features. The model captured the conditional variance. It did not capture the conditional mean. A rule that reads only the mean of the model's output captures none of the log-loss gain.
 
@@ -98,4 +98,4 @@ Longer-horizon proposals that build on the three questions above land as their o
 
 ## First sprint
 
-Sprint 118: draft the answer to Question 1 as a document. A comparison matrix of resolution × instrument-set × vendor × storage, with the hypothesis each cell would let the model test and the concrete cost of standing that cell up. That document is what unblocks every downstream sprint on any of the three tracks.
+Sprint 120: draft the answer to Question 1 as a document. (Numbered 118 in the first draft; Sprints 118-119 went to the baseline correction and the held-out guard.) A comparison matrix of resolution × instrument-set × vendor × storage, with the hypothesis each cell would let the model test and the concrete cost of standing that cell up. That document is what unblocks every downstream sprint on any of the three tracks.

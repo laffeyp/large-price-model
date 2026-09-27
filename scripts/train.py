@@ -32,6 +32,7 @@ from price_space_llm.config import (
     load_model_size_config,
 )
 from price_space_llm.git import git_sha
+from price_space_llm.heldout_guard import parquet_range_starts_in_heldout
 from price_space_llm.model import (
     MarketStateTransformerConfig,
     TransformerConfig,
@@ -313,6 +314,16 @@ def main(argv: list[str] | None = None) -> int:
     if not tokens_path.exists():
         print(f"train: tokens path not found: {tokens_path}", file=sys.stderr)
         return 1
+    # Sprint 119: training never reads held-out data; there is no override.
+    # Test looks go through evaluate.py / simulate.py. The README's reproduce
+    # command once trained on tokens.latest.pt while it pointed at held-out.
+    if parquet_range_starts_in_heldout(tokens_path, allow_unrecognized=True):
+        print(
+            f"train: refused {tokens_path} -> {tokens_path.resolve().name}: held-out "
+            "data cannot be a training input",
+            file=sys.stderr,
+        )
+        return 2
 
     size_tag = f"-{args.model_size}" if args.model_size else ""
     ctx_tag = f"-c{args.context_size}" if args.context_size else ""

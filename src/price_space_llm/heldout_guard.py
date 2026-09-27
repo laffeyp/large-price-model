@@ -34,7 +34,15 @@ KNOWN_DATED_PATTERNS: tuple[re.Pattern[str], ...] = (
     # tokens.<run_id>.pt where run_id embeds `tokenize-features-align-YYYY-MM-...`
     # per Sprint 078 versioned-write convention.
     re.compile(r"^tokens\.tokenize-features-align-(\d{4})-(\d{2})"),
+    # Sprint 119: the bare bucketize output (`tokenize-features-align-YYYY-MM-...pt`
+    # and its `.parquet` sibling), which the Sprint 117 held-out run read.
+    re.compile(r"^tokenize-features-align-(\d{4})-(\d{2})"),
 )
+
+# Sprint 119: any artifact whose name says it is held-out is held-out, whatever
+# its date layout. Sprint 117 wrote `tokens.sprint117-heldout-...-2024-01-2025-06-
+# tokenize.pt`, a shape no dated pattern matched.
+HELDOUT_NAME_MARK = "heldout"
 
 
 class HeldoutReadRefused(RuntimeError):
@@ -62,13 +70,23 @@ def parquet_range_starts_in_heldout(
     Pass `allow_unrecognized=True` to fall back to the pre-Sprint-081
     "unknown shape = not heldout" behavior — legitimate for callers that
     invoke the guard on scratch or non-artifact files.
+
+    Sprint 119: checks the symlink target's name as well as the link's own
+    name. `data/tokenized/tokens.latest.pt` is a symlink; after Sprint 117 it
+    pointed at the held-out tokens while its own name matched no pattern.
     """
-    for pattern in KNOWN_DATED_PATTERNS:
-        match = pattern.match(path.name)
-        if match is None:
-            continue
-        year = int(match.group(1))
-        return year >= HELDOUT_START_YEAR
+    names = [path.name]
+    if path.is_symlink():
+        names.append(path.resolve().name)
+    if any(HELDOUT_NAME_MARK in name for name in names):
+        return True
+    for name in names:
+        for pattern in KNOWN_DATED_PATTERNS:
+            match = pattern.match(name)
+            if match is None:
+                continue
+            year = int(match.group(1))
+            return year >= HELDOUT_START_YEAR
     if allow_unrecognized:
         return False
     raise UnrecognizedArtifactShape(
@@ -111,6 +129,7 @@ def guard_heldout_parquet(
 
 
 __all__ = [
+    "HELDOUT_NAME_MARK",
     "HELDOUT_START_YEAR",
     "KNOWN_DATED_PATTERNS",
     "HeldoutReadRefused",

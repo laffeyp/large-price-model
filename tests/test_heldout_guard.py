@@ -75,3 +75,64 @@ def test_guard_permits_with_flag():
 
 def test_guard_permits_pre_2024_without_flag():
     guard_heldout_parquet(Path("align-2015-01-2022-12-0000.parquet"))
+
+
+# Sprint 119: the Sprint 117 held-out tokens escaped every pattern above, and
+# data/tokenized/tokens.latest.pt (a symlink) pointed at them while the README
+# told readers to train on that path. Each test below plants that defect.
+
+SPRINT117_HELDOUT = "tokens.sprint117-heldout-sprint115-mixer-2024-01-2025-06-tokenize.pt"
+TRAINING_PT = (
+    "tokens.tokenize-features-align-2015-01-2022-12-0000000000000000-"
+    "0000000000000000-0000000000000000.pt"
+)
+
+
+def test_heldout_name_mark_detected_whatever_the_date_layout():
+    assert parquet_range_starts_in_heldout(Path(SPRINT117_HELDOUT))
+
+
+def test_bare_bucketize_output_detected_as_heldout():
+    bare = Path(
+        "tokenize-features-align-2024-01-2025-06-0000000000000000-"
+        "0000000000000000-0000000000000000.pt"
+    )
+    assert parquet_range_starts_in_heldout(bare)
+
+
+def test_innocent_symlink_to_heldout_is_heldout(tmp_path: Path):
+    target = tmp_path / SPRINT117_HELDOUT
+    target.write_bytes(b"")
+    link = tmp_path / "tokens.latest.pt"
+    link.symlink_to(target.name)
+    assert parquet_range_starts_in_heldout(link, allow_unrecognized=True)
+    with pytest.raises(HeldoutReadRefused):
+        guard_heldout_parquet(link, allow_unrecognized=True)
+
+
+def test_innocent_symlink_to_training_passes(tmp_path: Path):
+    target = tmp_path / TRAINING_PT
+    target.write_bytes(b"")
+    link = tmp_path / "tokens.latest.pt"
+    link.symlink_to(target.name)
+    assert not parquet_range_starts_in_heldout(link, allow_unrecognized=True)
+
+
+def test_train_refuses_symlink_to_heldout(tmp_path: Path):
+    import os
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[1]
+    target = tmp_path / SPRINT117_HELDOUT
+    target.write_bytes(b"")
+    link = tmp_path / "tokens.latest.pt"
+    link.symlink_to(target.name)
+    proc = subprocess.run(
+        ["uv", "run", "python", str(repo_root / "scripts" / "train.py"), "--tokens-pt", str(link)],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "PSLM_SKIP_EC2_CHECK": "1"},
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "held-out data cannot be a training input" in proc.stderr

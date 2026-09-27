@@ -176,6 +176,12 @@ def fit_linear(
 ) -> LinearBaseline:
     """Adam-fit a LinearBaseline on all valid windows. Sampling is deterministic given the seed.
 
+    The defaults (200 steps, batch 32, lr 1e-3) are smoke-test settings, not the configuration
+    behind any reported baseline number. More steps do not help: on the 2015-2022 artifact this
+    model (65,536 weights, 43,409 windows) peaks near step 800 at lr 1e-3 and overfits after.
+    Reported baselines are early-stopped on validation, the same rule the transformer runs use.
+    See `scripts/analysis/baseline_convergence.py` and `reports/baseline-convergence.md`.
+
     `magnitude_weights` (optional): shape (vocab_size,). Each example's CE loss is scaled by
     `magnitude_weights[target]`. Passing None gives the plain-linear baseline; passing a
     non-uniform vector gives the magnitude-weighted variant.
@@ -245,7 +251,11 @@ def fit_mlp(
     lr: float = 1e-3,
     seed: int = 0,
 ) -> MLPBaseline:
-    """Sprint 059: Adam-fit `MLPBaseline` on all valid windows. Deterministic given seed."""
+    """Sprint 059: Adam-fit `MLPBaseline` on all valid windows. Deterministic given seed.
+
+    Defaults are smoke-test settings; see `fit_linear` and `reports/baseline-convergence.md`
+    for the early-stopped configuration behind reported numbers.
+    """
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
     inputs, targets = _build_windows(train_tokens, context_len)
@@ -293,7 +303,11 @@ def fit_gru(
     lr: float = 1e-3,
     seed: int = 0,
 ) -> GRUBaseline:
-    """Sprint 060: Adam-fit `GRUBaseline`. Deterministic given seed."""
+    """Sprint 060: Adam-fit `GRUBaseline`. Deterministic given seed.
+
+    Defaults are smoke-test settings; see `fit_linear` and `reports/baseline-convergence.md`
+    for the early-stopped configuration behind reported numbers.
+    """
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
     inputs, targets = _build_windows(train_tokens, context_len)
